@@ -315,3 +315,7 @@ with more information (either through `LEAN_PATH` or through other options).
 -/
 public def leanSearchPath (env : Lake.Env) : SearchPath :=
   env.lake.libDir :: env.lean.leanLibDir :: env.leanPath
+
+/-- Get the elan bin directory (`~/.elan/bin`). -/
+public def elanBinDir? (env : Env) : Option FilePath :=
+  env.elan?.map (·.binDir)

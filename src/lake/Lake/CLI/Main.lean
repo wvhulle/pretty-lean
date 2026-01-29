@@ -922,6 +922,31 @@ protected def selfCheck : CliM PUnit := do
   processOptions lakeOption
   noArgsRem do verifyInstall (← getThe LakeOptions)
 
+protected def install : CliM PUnit := do
+  processOptions lakeOption
+  let opts ← getThe LakeOptions
+  let config ← mkLoadConfig opts
+  let ws ← loadWorkspace config
+  let targetSpecs ← takeArgs
+  let some binDir := ws.lakeEnv.elanBinDir?
+    | throw <| .invalidEnv "no Elan installation detected; `lake install` requires Elan"
+  let exes ←
+    if targetSpecs.isEmpty then
+      let exes := ws.root.leanExes
+      if exes.isEmpty then
+        throw <| .invalidEnv s!"package '{ws.root.baseName}' has no executable targets to install"
+      pure exes
+    else
+      targetSpecs.toArray.mapM fun spec => parseExeTargetSpec ws spec
+  let buildConfig := mkBuildConfig opts (out := .stdout) (showSuccess := true)
+  for exe in exes do
+    let exeFile ← ws.runBuild exe.fetch buildConfig
+    let destFile := binDir / exe.fileName
+    IO.FS.writeBinFile destFile (← IO.FS.readBinFile exeFile)
+    IO.Prim.setAccessRights destFile 0o755  -- rwxr-xr-x
+    logInfo s!"Installed {exe.name} to {destFile}"
+  logInfo s!"Installed {exes.size} executable(s) to {binDir}"
+
 protected def help : CliM PUnit := do
   IO.println <| help <| ← takeArgD ""
 
@@ -939,6 +964,7 @@ def lakeCli : (cmd : String) → CliM PUnit
 | "pack"                => lake.pack
 | "unpack"              => lake.unpack
 | "upload"              => lake.upload
+| "install"             => lake.install
 | "cache"               => lake.cache
 | "setup-file"          => lake.setupFile
 | "test"                => lake.test

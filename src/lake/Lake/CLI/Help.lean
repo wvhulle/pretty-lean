@@ -37,6 +37,7 @@ COMMANDS:
   pack                  pack build artifacts into an archive for distribution
   unpack                unpack build artifacts from an distributed archive
   upload <tag>          upload build artifacts to a GitHub release
+  install <targets>...  install executables globally to ~/.elan/bin
   cache                 manage the Lake cache
   script                manage and run workspace scripts
   scripts               shorthand for `lake script list`
@@ -569,6 +570,17 @@ already exists, Lake will error.
 Translation is lossy. It does not preserve comments or formatting and
 non-declarative configuration will be discarded."
 
+def helpInstall :=
+"Install a package's executables globally
+
+USAGE:
+  lake install [<targets>...]
+
+Builds the specified executable targets (or all package executables if none
+specified) and installs them to ~/.elan/bin/.
+
+Note: Requires an Elan installation."
+
 public def helpScript : (cmd : String) → String
 | "list"                => helpScriptList
 | "run"                 => helpScriptRun
@@ -590,6 +602,7 @@ public def help : (cmd : String) → String
 | "pack"                => helpPack
 | "unpack"              => helpUnpack
 | "upload"              => helpUpload
+| "install"             => helpInstall
 | "cache"               => helpCacheCli
 | "test"                => helpTest
 | "check-test"          => helpCheckTest
