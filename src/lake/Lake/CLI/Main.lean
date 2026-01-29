@@ -76,6 +76,8 @@ public structure LakeOptions where
   rev? : Option String := none
   maxRevs : Nat := 100
   shake : Shake.Args := {}
+  gitUrl? : Option String := none
+  gitBranch? : Option String := none
 
 def LakeOptions.outLv (opts : LakeOptions) : LogLevel :=
   opts.outLv?.getD opts.verbosity.minLogLv
@@ -298,6 +300,12 @@ def lakeLongOption : (opt : String) → CliM PUnit
   let configFile ← takeOptArg "--file" "path"
   modifyThe LakeOptions ({· with configFile})
 | "--help"        => modifyThe LakeOptions ({· with wantsHelp := true})
+| "--git" => do
+  let gitUrl ← takeOptArg "--git" "Git URL"
+  modifyThe LakeOptions ({· with gitUrl? := some gitUrl})
+| "--branch" => do
+  let gitBranch ← takeOptArg "--branch" "branch name"
+  modifyThe LakeOptions ({· with gitBranch? := some gitBranch})
 | "--"            => do
   let subArgs ← takeArgs
   modifyThe LakeOptions ({· with subArgs})
@@ -925,27 +933,48 @@ protected def selfCheck : CliM PUnit := do
 protected def install : CliM PUnit := do
   processOptions lakeOption
   let opts ← getThe LakeOptions
-  let config ← mkLoadConfig opts
-  let ws ← loadWorkspace config
   let targetSpecs ← takeArgs
-  let some binDir := ws.lakeEnv.elanBinDir?
+  -- Get the elan bin directory
+  let env ← opts.computeEnv
+  let some binDir := env.elanBinDir?
     | throw <| .invalidEnv "no Elan installation detected; `lake install` requires Elan"
-  let exes ←
-    if targetSpecs.isEmpty then
-      let exes := ws.root.leanExes
-      if exes.isEmpty then
-        throw <| .invalidEnv s!"package '{ws.root.baseName}' has no executable targets to install"
-      pure exes
-    else
-      targetSpecs.toArray.mapM fun spec => parseExeTargetSpec ws spec
-  let buildConfig := mkBuildConfig opts (out := .stdout) (showSuccess := true)
-  for exe in exes do
-    let exeFile ← ws.runBuild exe.fetch buildConfig
-    let destFile := binDir / exe.fileName
-    IO.FS.writeBinFile destFile (← IO.FS.readBinFile exeFile)
-    IO.Prim.setAccessRights destFile 0o755  -- rwxr-xr-x
-    logInfo s!"Installed {exe.name} to {destFile}"
-  logInfo s!"Installed {exes.size} executable(s) to {binDir}"
+  -- Handle --git option: clone to temp dir and install from there
+  if let some gitUrl := opts.gitUrl? then
+    IO.FS.withTempDir fun tmpDir => do
+      let repo := GitRepo.mk tmpDir
+      logInfo s!"Cloning {gitUrl}..."
+      repo.clone gitUrl
+      -- Checkout branch or revision if specified
+      if let some branch := opts.gitBranch? then
+        logInfo s!"Checking out branch {branch}..."
+        repo.checkoutBranch branch
+      else if let some rev := opts.rev? then
+        logInfo s!"Checking out revision {rev}..."
+        repo.checkoutDetach rev
+      let config ← mkLoadConfig {opts with rootDir := tmpDir, gitUrl? := none, gitBranch? := none, rev? := none}
+      let ws ← loadWorkspace config
+      installExes ws binDir targetSpecs (mkBuildConfig opts (out := .stdout) (showSuccess := true))
+  else
+    let config ← mkLoadConfig opts
+    let ws ← loadWorkspace config
+    installExes ws binDir targetSpecs (mkBuildConfig opts (out := .stdout) (showSuccess := true))
+where
+  installExes (ws : Workspace) (binDir : FilePath) (targetSpecs : List String) (buildConfig : BuildConfig) : CliStateM PUnit := do
+    let exes ←
+      if targetSpecs.isEmpty then
+        let exes := ws.root.leanExes
+        if exes.isEmpty then
+          throw <| .invalidEnv s!"package '{ws.root.baseName}' has no executable targets to install"
+        pure exes
+      else
+        targetSpecs.toArray.mapM fun spec => parseExeTargetSpec ws spec
+    for exe in exes do
+      let exeFile ← ws.runBuild exe.fetch buildConfig
+      let destFile := binDir / exe.fileName
+      IO.FS.writeBinFile destFile (← IO.FS.readBinFile exeFile)
+      IO.Prim.setAccessRights destFile 0o755  -- rwxr-xr-x
+      logInfo s!"Installed {exe.name} to {destFile}"
+    logInfo s!"Installed {exes.size} executable(s) to {binDir}"
 
 protected def help : CliM PUnit := do
   IO.println <| help <| ← takeArgD ""
