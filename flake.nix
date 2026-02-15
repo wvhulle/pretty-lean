@@ -191,7 +191,10 @@
                 pkgs.tree
               ];
               hardeningDisable = [ "all" ];
+              MAKEFLAGS = "-j$(nproc)";
               CTEST_OUTPUT_ON_FAILURE = 1;
+              # Pre-built stage0 from Nix, so `cmake` skips the ~20min bootstrap
+              STAGE0 = stage0;
             };
 
       in

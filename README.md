@@ -42,7 +42,7 @@ Run the Lean binaries directly without installing them permanently:
 - `nix run .#lean`: runs lean
 - `nix run .#lake`: runs lake
 
-The first time, this might take very long as `stage0` needs to be built (+20 minutes). Afterward, it should be much faster (~ 1s).
+The first time, this might take very long as `stage0` needs to be built (+20 minutes). Builds are cached until you do a Nix garbage collection.
 
 Some more commands you can try:
 
@@ -58,6 +58,8 @@ use flake
 
 ## Development
 
+### Structure
+
 The Nix flake outputs are named after upstream conventions. Lean compilation is split into several stages. Each stage is mapped to a Nix build target that can be cached by Nix.
 
 | Package   | Description                           |
@@ -68,6 +70,44 @@ The Nix flake outputs are named after upstream conventions. Lean compilation is 
 | `default` | Alias for `stage1`                    |
 
 All tool packages (`lean`, `lake`, `leanc`, `leanchecker`, `leanmake`) are the same derivation with a different entry point. Building any one of them gives you the complete toolchain.
+
+### Development Builds
+
+`nix build` always builds from scratch in a sandbox. Use the Nix dev shell when working on the Lean codebase (and ignoring the part of `stage0`):
+
+```bash
+nix develop
+```
+
+Configure with Nix-cached `stage0` (skips ~20min bootstrap):
+
+```bash
+cmake -S . -B build/release \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DUSE_MIMALLOC=ON \
+  -DSTAGE1_PREV_STAGE=$STAGE0
+
+# Build stage1
+make -C build/release stage1
+```
+
+The dev shell sets `MAKEFLAGS="-j$(nproc)"` automatically, so all `make` invocations use full parallelism.
+
+After editing `src/*`, just re-run `make` to re-use the `stage0` cache:
+
+```bash
+make -C build/release stage1
+```
+
+### Ignoring Nix `stage0` Cache
+
+The dev shell sets `$STAGE0` to the Nix-cached stage0 output. To build stage0 from source instead (e.g. when hacking on `stage0/`), omit `-DSTAGE1_PREV_STAGE`:
+
+```bash
+cmake -S . -B build/release \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DUSE_MIMALLOC=ON
+```
 
 ## Related
 
