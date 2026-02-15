@@ -6,7 +6,7 @@
   };
 
   outputs =
-    { self, nixpkgs }:
+    { nixpkgs, ... }:
     let
       systems = [
         "x86_64-linux"
@@ -14,7 +14,7 @@
       ];
 
       # Keep in sync with src/CMakeLists.txt LEAN_VERSION_*
-      version = "4.28.0-pre";
+      version = "4.28.0-nix";
 
       eachSystem = f: builtins.foldl' nixpkgs.lib.recursiveUpdate { } (map f systems);
     in
@@ -23,8 +23,6 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
         inherit (pkgs) lib stdenv;
-
-        gitSha1 = self.rev or self.dirtyRev or "unknown";
 
         setupMimalloc = ''
           mkdir -p mimalloc/src
@@ -35,6 +33,7 @@
         commonCmakeFlags = [
           "-DCMAKE_BUILD_TYPE=Release"
           "-DUSE_MIMALLOC=ON"
+          "-DLEAN_SPECIAL_VERSION_DESC=nix"
           "-DLEAN_EXTRA_CXX_FLAGS=-Wno-array-bounds"
         ];
 
@@ -76,13 +75,15 @@
           fi
         '';
 
-        # Expose a single binary from stage1 as its own package.
-        mkToolWrapper =
+        # Same derivation as stage1 but with a different mainProgram for `nix run`.
+        mkToolAlias =
           name:
-          pkgs.runCommand "${name}-${version}" { meta.mainProgram = name; } ''
-            mkdir -p $out/bin
-            ln -s ${stage1}/bin/${name} $out/bin/${name}
-          '';
+          stage1
+          // {
+            meta = stage1.meta // {
+              mainProgram = name;
+            };
+          };
 
         stage0 = mkLeanDerivation {
           pname = "lean-stage0";
@@ -117,8 +118,7 @@
           cmakeFlags = commonCmakeFlags ++ [
             "-DSTAGE=1"
             "-DPREV_STAGE=${stage0}"
-            "-DUSE_GITHASH=ON"
-            "-DGIT_SHA1=${gitSha1}"
+            "-DUSE_GITHASH=OFF"
             "-DINSTALL_LICENSE=ON"
             "-DINSTALL_CADICAL=ON"
             "-DUSE_LAKE=ON"
@@ -141,8 +141,7 @@
           cmakeFlags = commonCmakeFlags ++ [
             "-DSTAGE=2"
             "-DPREV_STAGE=${stage1}"
-            "-DUSE_GITHASH=ON"
-            "-DGIT_SHA1=${gitSha1}"
+            "-DUSE_GITHASH=OFF"
             "-DINSTALL_LICENSE=ON"
             "-DINSTALL_CADICAL=ON"
             "-DUSE_LAKE=ON"
@@ -160,11 +159,11 @@
         packages.${system} = {
           inherit stage0 stage1 stage2;
           default = stage1;
-          lean = mkToolWrapper "lean";
-          lake = mkToolWrapper "lake";
-          leanc = mkToolWrapper "leanc";
-          leanchecker = mkToolWrapper "leanchecker";
-          leanmake = mkToolWrapper "leanmake";
+          lean = mkToolAlias "lean";
+          lake = mkToolAlias "lake";
+          leanc = mkToolAlias "leanc";
+          leanchecker = mkToolAlias "leanchecker";
+          leanmake = mkToolAlias "leanmake";
         };
 
         devShells.${system}.default =
