@@ -39,16 +39,19 @@ Add this repo as a Flake input to any of your Flake-based Nix projects:
 
 Run the Lean binaries directly without installing them permanently:
 
-- `nix run .#lean`: runs lean
-- `nix run .#lake`: runs lake
+- `nix run .#lean`
+- `nix run .#lake`
 
-The first time, this might take very long as `stage0` needs to be built (+20 minutes). Builds are cached until you do a Nix garbage collection.
+The first time, you can choose between:
 
-Some more commands you can try:
+- Compiling from scratch: this might take very long as `stage0` needs to be built (+20 minutes). Builds are cached until you do a Nix garbage collection.
+- Using the Cachix cache (recommended): downloads prebuilt artifacts
 
-- `nix run .#leanc`: runs leanc
-- `nix run .#leanchecker`: runs leanchecker
-- `nix run .#leanmake`: runs leanmake
+Less commonly used binaries are also included:
+
+- `nix run .#leanc`
+- `nix run .#leanchecker`
+- `nix run .#leanmake`
 
 ## Development
 
@@ -56,14 +59,34 @@ Some more commands you can try:
 
 The Nix flake outputs are named after upstream conventions. Lean compilation is split into several stages. Each stage is mapped to a Nix build target that can be cached by Nix.
 
-| Package   | Description                           |
-| --------- | ------------------------------------- |
-| `stage0`  | Bootstrap compiler (from C sources)   |
-| `stage1`  | Full toolchain built by stage0        |
-| `stage2`  | Self-hosted rebuild (built by stage1) |
-| `default` | Alias for `stage1`                    |
+| Package   | C (transpiled) | C++ (runtime) | Lean | Description                          |
+| --------- | -------------- | ------------- | ---- | ------------------------------------ |
+| `stage0`  | yes            | yes           | no   | Bootstrap compiler                   |
+| `stage1`  | no             | yes           | yes  | Full toolchain, compiled by `stage0` |
+| `stage2`  | no             | yes           | yes  | Verification rebuild by `stage1`     |
+| `default` |                |               |      | Alias for `stage1`                   |
 
 All tool packages (`lean`, `lake`, `leanc`, `leanchecker`, `leanmake`) are the same derivation with a different entry point. Building any one of them gives you the complete toolchain.
+
+### Building for Nix
+
+You can build for example `stage0` with:
+
+```bash
+nix build .#stage0
+```
+
+To build and simultaneously push artifacts to Cachix so others can have quicker builds:
+
+```bash
+cachix watch-exec wvhulle -- nix build .#stage0
+```
+
+To push an already-built result afterward:
+
+```bash
+nix build .#stage0 --print-out-paths | cachix push wvhulle
+```
 
 ### Caching `stage0` with Nix
 
@@ -92,19 +115,13 @@ cmake -S . -B build/release \
 
 ### Development Builds
 
-After caching `stage0` and running CMake configuration in previous steps once, you can build `stage1`
+After caching `stage0` and running CMake configuration in previous steps once, you can build (and rebuild after editing `src/*`) with:
 
 ```bash
 make -C build/release stage1
 ```
 
 The dev shell sets `MAKEFLAGS="-j$(nproc)"` automatically, so all `make` invocations use full parallelism.
-
-After editing `src/*`, just re-run `make` to re-use the `stage0` cache:
-
-```bash
-make -C build/release stage1
-```
 
 ### Ignoring Nix `stage0` Cache
 
