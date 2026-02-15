@@ -29,7 +29,7 @@ Add this repo as a Flake input to any of your Flake-based Nix projects:
       lean = lean4.packages.x86_64-linux;
     in {
       devShells.x86_64-linux.default = pkgs.mkShell {
-        packages = [ lean.lake ]; # includes lean, lake, leanc, leanchecker
+        packages = [ lean.lean ];
       };
     };
 }
@@ -50,12 +50,6 @@ Some more commands you can try:
 - `nix run .#leanchecker`: runs leanchecker
 - `nix run .#leanmake`: runs leanmake
 
-I recommend installing `direnv` and creating a `.envrc` file:
-
-```bash
-use flake
-```
-
 ## Development
 
 ### Structure
@@ -71,7 +65,7 @@ The Nix flake outputs are named after upstream conventions. Lean compilation is 
 
 All tool packages (`lean`, `lake`, `leanc`, `leanchecker`, `leanmake`) are the same derivation with a different entry point. Building any one of them gives you the complete toolchain.
 
-### Development Builds
+### Caching `stage0` with Nix
 
 `nix build` always builds from scratch in a sandbox. Use the Nix dev shell when working on the Lean codebase (and ignoring the part of `stage0`):
 
@@ -79,15 +73,28 @@ All tool packages (`lean`, `lake`, `leanc`, `leanchecker`, `leanmake`) are the s
 nix develop
 ```
 
-Configure with Nix-cached `stage0` (skips ~20min bootstrap):
+This might take awhile, since Nix will build and cache `stage0`.
+
+I recommend installing `direnv` and creating a `.envrc` file:
+
+```bash
+use flake
+```
+
+Run this configuration step once. It will configurei CMake to use the cached `stage0` (skips ~20min bootstrap):
 
 ```bash
 cmake -S . -B build/release \
   -DCMAKE_BUILD_TYPE=Release \
   -DUSE_MIMALLOC=ON \
   -DSTAGE1_PREV_STAGE=$STAGE0
+```
 
-# Build stage1
+### Development Builds
+
+After caching `stage0` and running CMake configuration in previous steps once, you can build `stage1`
+
+```bash
 make -C build/release stage1
 ```
 
@@ -111,7 +118,7 @@ cmake -S . -B build/release \
 
 ## Related
 
-This project primary serves as an easy way for me to hack on the upstream Lean codebase while using Nix.
+This project primarily serves as an easy way for me to hack on the upstream Lean codebase while using Nix.
 
 Try some of my other Lean projects:
 

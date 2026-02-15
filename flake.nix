@@ -26,25 +26,11 @@
 
         gitSha1 = self.rev or self.dirtyRev or "unknown";
 
-        # -- Shared build configuration -----------------------------------------
-
         setupMimalloc = ''
           mkdir -p mimalloc/src
           cp -r ${pkgs.mimalloc.src} mimalloc/src/mimalloc
           chmod -R u+w mimalloc
         '';
-
-        cmakeDeps = {
-          nativeBuildInputs = [
-            pkgs.cmake
-            pkgs.git
-            pkgs.pkg-config
-          ];
-          buildInputs = [
-            pkgs.gmp
-            pkgs.libuv
-          ];
-        };
 
         commonCmakeFlags = [
           "-DCMAKE_BUILD_TYPE=Release"
@@ -52,35 +38,35 @@
           "-DLEAN_EXTRA_CXX_FLAGS=-Wno-array-bounds"
         ];
 
-        mkLeanDerivation = attrs: stdenv.mkDerivation (cmakeDeps // attrs);
+        mkLeanDerivation =
+          attrs:
+          stdenv.mkDerivation (
+            {
+              nativeBuildInputs = [
+                pkgs.cmake
+                pkgs.git
+                pkgs.pkg-config
+              ];
+              buildInputs = [
+                pkgs.gmp
+                pkgs.libuv
+              ];
+              preBuild = "patchShebangs .";
+              preInstall = "rm -f src/lean";
+            }
+            // attrs
+          );
 
-        # -- Stage 0: bootstrap compiler (cached separately) --------------------
-        # Only rebuilds when stage0/ content changes. Since stage0 is updated
-        # infrequently (chore: update stage0), this gives effective caching.
-
-        stage0 = mkLeanDerivation {
-          pname = "stage0";
-          inherit version;
-          src = lib.fileset.toSource {
-            root = ./.;
-            fileset = ./stage0;
-          };
-          sourceRoot = "source/stage0/src";
-          preConfigure = setupMimalloc;
-          preBuild = "patchShebangs .";
-          preInstall = "rm -f src/lean";
-          cmakeFlags = commonCmakeFlags ++ [
-            "-DSTAGE=0"
-            "-DUSE_GITHASH=OFF"
+        srcFiles = lib.fileset.toSource {
+          root = ./.;
+          fileset = lib.fileset.unions [
+            ./src
+            ./LICENSE
+            ./LICENSES
           ];
-          meta.license = lib.licenses.asl20;
-          meta.platforms = lib.platforms.linux;
         };
 
-        # -- Stage 1: full Lean toolchain ---------------------------------------
-
         # Assert that the Nix-side version matches what CMake configured.
-        # Catches stale version after a bump in src/CMakeLists.txt.
         checkVersion = ''
           cmake_version=$(sed -n 's/.*LEAN_VERSION_STRING "\(.*\)"/\1/p' include/lean/version.h)
           if [ "$cmake_version" != "${version}" ]; then
@@ -90,29 +76,39 @@
           fi
         '';
 
+        # Expose a single binary from stage1 as its own package.
+        mkToolWrapper =
+          name:
+          pkgs.runCommand "${name}-${version}" { meta.mainProgram = name; } ''
+            mkdir -p $out/bin
+            ln -s ${stage1}/bin/${name} $out/bin/${name}
+          '';
+
+        stage0 = mkLeanDerivation {
+          pname = "lean-stage0";
+          inherit version;
+          src = lib.fileset.toSource {
+            root = ./.;
+            fileset = ./stage0;
+          };
+          sourceRoot = "source/stage0/src";
+          preConfigure = setupMimalloc;
+          cmakeFlags = commonCmakeFlags ++ [
+            "-DSTAGE=0"
+            "-DUSE_GITHASH=OFF"
+          ];
+          meta.license = lib.licenses.asl20;
+          meta.platforms = lib.platforms.linux;
+        };
+
         stage1 = mkLeanDerivation {
           pname = "lean";
           inherit version;
-          # Only include files needed for the stage1 build. Excludes stage0/,
-          # tests/, flake.nix etc. so edits to those don't trigger a rebuild.
-          src = lib.fileset.toSource {
-            root = ./.;
-            fileset = lib.fileset.unions [
-              ./src
-              ./LICENSE
-              ./LICENSES
-            ];
-          };
+          src = srcFiles;
           sourceRoot = "source/src";
           preConfigure = setupMimalloc;
           postConfigure = checkVersion;
-          preBuild = "patchShebangs .";
-          # CMake creates a symlink to the source dir for go-to-definition.
-          # It becomes dangling after the sandbox is gone, so remove it
-          # before install copies it into $out.
-          preInstall = "rm -f src/lean";
-          # Stage2+ needs these files from PREV_STAGE but the default
-          # install rules exclude them. Copy them into $out.
+          # Stage2 needs these from PREV_STAGE; default install rules exclude them.
           postInstall = ''
             mkdir -p $out/runtime $out/lib/temp
             cp runtime/libleanrt_initial-exec.a $out/runtime/
@@ -136,25 +132,12 @@
           };
         };
 
-        # -- Stage 2: self-hosted Lean toolchain ---------------------------------
-        # Built with the stage1 compiler. Proves stage1 can compile itself.
-        # Reuses C++ runtime from stage1; only recompiles Lean sources.
-
         stage2 = mkLeanDerivation {
-          pname = "stage2";
+          pname = "lean-stage2";
           inherit version;
-          src = lib.fileset.toSource {
-            root = ./.;
-            fileset = lib.fileset.unions [
-              ./src
-              ./LICENSE
-              ./LICENSES
-            ];
-          };
+          src = srcFiles;
           sourceRoot = "source/src";
           preConfigure = setupMimalloc;
-          preBuild = "patchShebangs .";
-          preInstall = "rm -f src/lean";
           cmakeFlags = commonCmakeFlags ++ [
             "-DSTAGE=2"
             "-DPREV_STAGE=${stage1}"
@@ -172,9 +155,19 @@
           };
         };
 
-        # -- Development shell ---------------------------------------------------
+      in
+      {
+        packages.${system} = {
+          inherit stage0 stage1 stage2;
+          default = stage1;
+          lean = mkToolWrapper "lean";
+          lake = mkToolWrapper "lake";
+          leanc = mkToolWrapper "leanc";
+          leanchecker = mkToolWrapper "leanchecker";
+          leanmake = mkToolWrapper "leanmake";
+        };
 
-        devShell =
+        devShells.${system}.default =
           (pkgs.mkShell.override {
             stdenv = pkgs.overrideCC stdenv pkgs.llvmPackages.clang;
           })
@@ -193,26 +186,8 @@
               hardeningDisable = [ "all" ];
               MAKEFLAGS = "-j$(nproc)";
               CTEST_OUTPUT_ON_FAILURE = 1;
-              # Pre-built stage0 from Nix, so `cmake` skips the ~20min bootstrap
               STAGE0 = stage0;
             };
-
-      in
-      {
-        packages.${system} = {
-          inherit stage0 stage1 stage2;
-          default = stage1;
-        }
-        // lib.genAttrs [ "lean" "lake" "leanc" "leanchecker" "leanmake" ] (
-          name:
-          stage1
-          // {
-            meta = stage1.meta // {
-              mainProgram = name;
-            };
-          }
-        );
-        devShells.${system}.default = devShell;
       }
     );
 }
