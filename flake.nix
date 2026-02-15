@@ -13,14 +13,6 @@
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
 
-      # Mimalloc source - used by all builds
-      mimallocSrc = pkgs: pkgs.fetchFromGitHub {
-        owner = "microsoft";
-        repo = "mimalloc";
-        rev = "v2.2.3";
-        sha256 = "sha256-B0gngv16WFLBtrtG5NqA2m5e95bYVcQraeITcOX9A74=";
-      };
-
       # Per-system outputs
       forSystem = system:
         let
@@ -42,12 +34,12 @@
 
             sourceRoot = "source";
 
-            # Set up mimalloc before configure
+            # Set up mimalloc from nixpkgs before configure
             preConfigure = ''
-              mkdir -p mimalloc/src
-              cp -r ${mimallocSrc pkgs} mimalloc/src/mimalloc
-              chmod -R u+w mimalloc
               cd src
+              mkdir -p mimalloc/src
+              cp -r ${pkgs.mimalloc.src} mimalloc/src/mimalloc
+              chmod -R u+w mimalloc
             '';
 
             cmakeFlags = [
