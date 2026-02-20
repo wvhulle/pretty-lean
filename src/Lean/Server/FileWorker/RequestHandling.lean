@@ -486,17 +486,40 @@ def handleDocumentFormatting (_ : DocumentFormattingParams)
     : RequestM (RequestTask (Array TextEdit)) := do
   let doc ← readDoc
   let text := doc.meta.text
-  let t := doc.cmdSnaps.waitAll
-  mapTaskCostly t fun (snaps, _) => do
+  let initSnap := doc.initSnap
+  let some headerParsed := initSnap.result?
+    | return ServerTask.pure (.error (RequestError.internalError "header parsing failed"))
+  -- Wait only for header processing (imports), not full elaboration
+  let headerProcessedTask := headerParsed.processedSnap.task.asServerTask
+  mapTaskCostly headerProcessedTask fun headerProcessed => do
+    let some headerSuccess := headerProcessed.result?
+      | throw ⟨.internalError, "import processing failed"⟩
+    -- Collect all parsed command syntax by walking the CommandParsedSnapshot chain.
+    -- This only blocks on parsing (fast), not elaboration.
+    let mut stxs : Array Syntax := #[initSnap.stx]
+    let mut next? := some headerSuccess.firstCmdSnap
+    repeat do
+      match next? with
+      | none => break
+      | some snapshotTask =>
+        let cmdParsed := snapshotTask.get
+        stxs := stxs.push cmdParsed.stx
+        next? := cmdParsed.nextCmdSnap?
+    -- Format using the header/import environment (has all formatter registrations)
+    let headerSnap : Snapshots.Snapshot := {
+      stx := initSnap.stx
+      mpState := headerParsed.parserState
+      cmdState := headerSuccess.cmdState
+    }
     let mut parts : Array String := #[]
     let mut first := true
-    for snap in snaps do
+    for stx in stxs do
       let formatted ← try
-        let fmt ← snap.runCoreM doc.meta (PrettyPrinter.ppCommand ⟨snap.stx⟩)
+        let fmt ← headerSnap.runCoreM doc.meta (PrettyPrinter.ppCommand ⟨stx⟩)
         pure fmt.pretty
       catch _ =>
         -- If pretty-printing fails, fall back to the original text
-        pure (snap.stx.reprint.getD "")
+        pure (stx.reprint.getD "")
       if first then first := false else parts := parts.push "\n"
       parts := parts.push formatted
     let newText := String.join parts.toList
