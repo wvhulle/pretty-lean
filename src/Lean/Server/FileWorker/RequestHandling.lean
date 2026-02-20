@@ -482,6 +482,21 @@ partial def handleWaitForDiagnostics (p : WaitForDiagnosticsParams)
     return doc.reporter.bindCheap (fun _ => doc.cmdSnaps.waitAll)
       |>.mapCheap fun _ => pure WaitForDiagnostics.mk
 
+/-- Collapse runs of 3+ consecutive newlines down to 2 (at most one blank line). -/
+private partial def collapseBlankLines (s : String) : String :=
+  go 0 0 ""
+where
+  go (i : String.Pos.Raw) (nlCount : Nat) (acc : String) : String :=
+    if i < s.rawEndPos then
+      let c := String.Pos.Raw.get s i
+      if c == '\n' then
+        let nlCount' := nlCount + 1
+        let acc' := if nlCount' ≤ 2 then acc.push '\n' else acc
+        go (String.Pos.Raw.next s i) nlCount' acc'
+      else
+        go (String.Pos.Raw.next s i) 0 (acc.push c)
+    else acc
+
 def handleDocumentFormatting (_ : DocumentFormattingParams)
     : RequestM (RequestTask (Array TextEdit)) := do
   let doc ← readDoc
@@ -512,16 +527,24 @@ def handleDocumentFormatting (_ : DocumentFormattingParams)
       cmdState := headerSuccess.cmdState
     }
     let mut parts : Array String := #[]
-    let mut first := true
+    let mut prevTailPos : Option String.Pos.Raw := none
     for stx in stxs do
+      -- Insert the gap between the previous command and this one, preserving
+      -- standalone comments and blank lines from the original source.
+      match prevTailPos, stx.getPos? with
+      | some prevEnd, some curStart =>
+        let gap := String.Pos.Raw.extract text.source prevEnd curStart
+        parts := parts.push (collapseBlankLines gap)
+      | none, _ => pure ()  -- first command, no gap needed
+      | _, none => parts := parts.push "\n"  -- fallback
       let formatted ← try
         let fmt ← headerSnap.runCoreM doc.meta (PrettyPrinter.ppCommand ⟨stx⟩)
-        pure fmt.pretty
+        pure fmt.pretty.trimRight
       catch _ =>
         -- If pretty-printing fails, fall back to the original text
-        pure (stx.reprint.getD "")
-      if first then first := false else parts := parts.push "\n"
+        pure (stx.reprint.getD "").trimRight
       parts := parts.push formatted
+      prevTailPos := stx.getTailPos?
     let newText := String.join parts.toList
     let endPos := text.utf8PosToLspPos text.source.rawEndPos
     let fullRange : Range := ⟨⟨0, 0⟩, endPos⟩
