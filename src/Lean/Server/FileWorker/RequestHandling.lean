@@ -482,6 +482,28 @@ partial def handleWaitForDiagnostics (p : WaitForDiagnosticsParams)
     return doc.reporter.bindCheap (fun _ => doc.cmdSnaps.waitAll)
       |>.mapCheap fun _ => pure WaitForDiagnostics.mk
 
+def handleDocumentFormatting (_ : DocumentFormattingParams)
+    : RequestM (RequestTask (Array TextEdit)) := do
+  let doc ← readDoc
+  let text := doc.meta.text
+  let t := doc.cmdSnaps.waitAll
+  mapTaskCostly t fun (snaps, _) => do
+    let mut parts : Array String := #[]
+    let mut first := true
+    for snap in snaps do
+      let formatted ← try
+        let fmt ← snap.runCoreM doc.meta (PrettyPrinter.ppCommand ⟨snap.stx⟩)
+        pure fmt.pretty
+      catch _ =>
+        -- If pretty-printing fails, fall back to the original text
+        pure (snap.stx.reprint.getD "")
+      if first then first := false else parts := parts.push "\n"
+      parts := parts.push formatted
+    let newText := String.join parts.toList
+    let endPos := text.utf8PosToLspPos text.source.rawEndPos
+    let fullRange : Range := ⟨⟨0, 0⟩, endPos⟩
+    return #[{ range := fullRange, newText }]
+
 def handleDocumentColor (_ : DocumentColorParams) :
     RequestM (RequestTask (Array ColorInformation)) :=
   -- By default, if no document color provider is registered, VS Code itself provides
@@ -549,6 +571,11 @@ builtin_initialize
     SignatureHelpParams
     (Option SignatureHelp)
     handleSignatureHelp
+  registerLspRequestHandler
+    "textDocument/formatting"
+    DocumentFormattingParams
+    (Array TextEdit)
+    handleDocumentFormatting
   registerLspRequestHandler
     "textDocument/documentColor"
     DocumentColorParams
