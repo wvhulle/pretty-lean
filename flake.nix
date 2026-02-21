@@ -187,6 +187,9 @@
                   llvmPackages.llvm
                   gdb
                   tree
+                  bash
+                  perl
+                  diffutils
                 ];
                 hardeningDisable = [ "all" ];
                 MAKEFLAGS = "-j$(nproc)";
