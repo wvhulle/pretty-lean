@@ -3,4 +3,4 @@
 [{"range":
   {"start": {"line": 0, "character": 0}, "end": {"line": 9, "character": 0}},
   "newText":
-  "structure Point where\n  x : Nat\n  y : Nat\n\ninstance : ToString Point where toString p := s! \"({p.x }, {p.y})\"\n\ndef origin : Point :=\n  { x := 0, y := 0 }\n\n--^ formatting\n"}]
+  "structure Point where\n  x : Nat\n  y : Nat\n\ninstance : ToString Point where toString p := s! \"({p.x }, {p.y})\"\n\ndef origin : Point :=\n  { x := 0, y := 0 }\n--^ formatting\n"}]

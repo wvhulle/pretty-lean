@@ -485,37 +485,43 @@ partial def handleWaitForDiagnostics (p : WaitForDiagnosticsParams)
 /-- Strip trailing lines that are pure comments or blank from ppCommand output.
 The formatter's `pushToken` preserves trailing `SourceInfo` comments at incorrect
 indentation (nested under the last expression). The gap extraction re-includes them
-at their correct original indentation. -/
-private partial def stripTrailingCommentLines (s : String) : String :=
-  -- Walk forward, tracking the end position of the last line that has real content
-  -- (not just whitespace or a line comment).
-  go 0 false false false 0
+at their correct original indentation.
+Scans backward from the end so only trailing lines are inspected. -/
+private partial def trimTrailingCommentLines (s : String) : String :=
+  -- Walk backward line by line. A line is "comment-only" if, after stripping
+  -- leading whitespace, it is empty or starts with "--".
+  go s.rawEndPos
 where
-  go (i : String.Pos.Raw) (lineHasContent : Bool) (sawDash : Bool)
-     (inComment : Bool) (lastContentEnd : String.Pos.Raw) : String :=
-    if i < s.rawEndPos then
-      let c := String.Pos.Raw.get s i
-      let next := String.Pos.Raw.next s i
-      if c == '\n' then
-        let lastContentEnd' := if lineHasContent then next else lastContentEnd
-        go next false false false lastContentEnd'
-      else if inComment then
-        -- Inside a line comment, skip until newline
-        go next lineHasContent false true lastContentEnd
-      else if sawDash && c == '-' then
-        -- Saw "--", enter comment mode for rest of line
-        go next lineHasContent false true lastContentEnd
-      else if c == '-' then
-        go next lineHasContent true false lastContentEnd
-      else if c == ' ' || c == '\t' then
-        go next lineHasContent false false lastContentEnd
-      else
-        -- Real content on this line
-        go next true false false lastContentEnd
+  -- Find the start of the line ending just before `pos` (the char at `pos` is '\n' or end).
+  findLineStart (pos : String.Pos.Raw) : String.Pos.Raw :=
+    if pos == 0 then 0
     else
-      -- End of string: if current line has content, include everything
-      if lineHasContent then s
-      else String.Pos.Raw.extract s 0 lastContentEnd
+      let p := ⟨pos.byteIdx - 1⟩
+      let c := String.Pos.Raw.get s p
+      if c == '\n' then pos
+      else findLineStart p
+  isCommentOrBlankLine (lineStart lineEnd : String.Pos.Raw) : Bool :=
+    let rec scan (i : String.Pos.Raw) : Bool :=
+      if i >= lineEnd then true  -- blank line
+      else
+        let c := String.Pos.Raw.get s i
+        if c == ' ' || c == '\t' then scan (String.Pos.Raw.next s i)
+        else if c == '-' then
+          let j := String.Pos.Raw.next s i
+          j < lineEnd && String.Pos.Raw.get s j == '-'  -- "--" prefix
+        else false
+    scan lineStart
+  go (pos : String.Pos.Raw) : String :=
+    if pos == 0 then ""
+    else
+      -- pos points one past the last char we're considering (either '\n' or end)
+      let lineStart := findLineStart pos
+      if isCommentOrBlankLine lineStart pos then
+        -- Skip this trailing line; also skip the preceding '\n' if present
+        let cutpoint := if lineStart > 0 then ⟨lineStart.byteIdx - 1⟩ else 0
+        go cutpoint
+      else
+        String.Pos.Raw.extract s 0 pos
 
 /-- Collapse runs of 3+ consecutive newlines down to 2 (at most one blank line). -/
 private partial def collapseBlankLines (s : String) : String :=
@@ -532,6 +538,59 @@ where
         go (String.Pos.Raw.next s i) 0 (acc.push c)
     else acc
 
+/-- Format commands in `[rangeStart, rangeEnd)` byte range. Commands outside the range
+are emitted verbatim from the original source. Returns a full-document `TextEdit`. -/
+private def formatCommandRange
+    (doc : EditableDocument) (text : FileMap)
+    (initSnap : Language.Lean.InitialSnapshot)
+    (headerParsed : Language.Lean.HeaderParsedState)
+    (headerSuccess : Language.Lean.HeaderProcessedState)
+    (rangeStart rangeEnd : String.Pos.Raw)
+    : EIO RequestError (Array TextEdit) := do
+  -- Collect all parsed command syntax by walking the CommandParsedSnapshot chain.
+  let mut stxs : Array Syntax := #[initSnap.stx]
+  let mut next? := some headerSuccess.firstCmdSnap
+  repeat do
+    match next? with
+    | none => break
+    | some snapshotTask =>
+      let cmdParsed := snapshotTask.get
+      stxs := stxs.push cmdParsed.stx
+      next? := cmdParsed.nextCmdSnap?
+  let headerSnap : Snapshots.Snapshot := {
+    stx := initSnap.stx
+    mpState := headerParsed.parserState
+    cmdState := headerSuccess.cmdState
+  }
+  let mut result : String := ""
+  let mut prevTailPos : Option String.Pos.Raw := none
+  for stx in stxs do
+    match prevTailPos, stx.getPos? with
+    | some prevEnd, some curStart =>
+      let gap := String.Pos.Raw.extract text.source prevEnd curStart
+      result := result ++ collapseBlankLines gap
+    | none, _ => pure ()
+    | _, none => result := result ++ "\n"
+    let cmdStart := stx.getPos?.getD 0
+    let cmdEnd := stx.getTailPos?.getD 0
+    let overlaps := cmdStart < rangeEnd && cmdEnd > rangeStart
+    if overlaps then
+      let fmtResult ← (headerSnap.runCoreM doc.meta (PrettyPrinter.ppCommand ⟨stx⟩)).toBaseIO
+      let formatted := match fmtResult with
+        | .ok fmt => trimTrailingCommentLines fmt.pretty.trimAsciiEnd.copy
+        | .error _ => trimTrailingCommentLines (stx.reprint.getD "").trimAsciiEnd.copy
+      result := result ++ formatted
+    else
+      -- Outside requested range: emit original source verbatim
+      let original := match stx.getPos?, stx.getTailPos? with
+        | some s, some e => String.Pos.Raw.extract text.source s e
+        | _, _ => stx.reprint.getD ""
+      result := result ++ original.trimAsciiEnd.copy
+    prevTailPos := stx.getTailPos?
+  let endPos := text.utf8PosToLspPos text.source.rawEndPos
+  let fullRange : Range := ⟨⟨0, 0⟩, endPos⟩
+  return #[{ range := fullRange, newText := result }]
+
 def handleDocumentFormatting (_ : DocumentFormattingParams)
     : RequestM (RequestTask (Array TextEdit)) := do
   let doc ← readDoc
@@ -539,51 +598,29 @@ def handleDocumentFormatting (_ : DocumentFormattingParams)
   let initSnap := doc.initSnap
   let some headerParsed := initSnap.result?
     | return ServerTask.pure (.error (RequestError.internalError "header parsing failed"))
-  -- Wait only for header processing (imports), not full elaboration
   let headerProcessedTask := headerParsed.processedSnap.task.asServerTask
   mapTaskCostly headerProcessedTask fun headerProcessed => do
     let some headerSuccess := headerProcessed.result?
       | throw ⟨.internalError, "import processing failed"⟩
-    -- Collect all parsed command syntax by walking the CommandParsedSnapshot chain.
-    -- This only blocks on parsing (fast), not elaboration.
-    let mut stxs : Array Syntax := #[initSnap.stx]
-    let mut next? := some headerSuccess.firstCmdSnap
-    repeat do
-      match next? with
-      | none => break
-      | some snapshotTask =>
-        let cmdParsed := snapshotTask.get
-        stxs := stxs.push cmdParsed.stx
-        next? := cmdParsed.nextCmdSnap?
-    -- Format using the header/import environment (has all formatter registrations)
-    let headerSnap : Snapshots.Snapshot := {
-      stx := initSnap.stx
-      mpState := headerParsed.parserState
-      cmdState := headerSuccess.cmdState
-    }
-    let mut parts : Array String := #[]
-    let mut prevTailPos : Option String.Pos.Raw := none
-    for stx in stxs do
-      -- Insert the gap between the previous command and this one, preserving
-      -- standalone comments and blank lines from the original source.
-      match prevTailPos, stx.getPos? with
-      | some prevEnd, some curStart =>
-        let gap := String.Pos.Raw.extract text.source prevEnd curStart
-        parts := parts.push (collapseBlankLines gap)
-      | none, _ => pure ()  -- first command, no gap needed
-      | _, none => parts := parts.push "\n"  -- fallback
-      let formatted ← try
-        let fmt ← headerSnap.runCoreM doc.meta (PrettyPrinter.ppCommand ⟨stx⟩)
-        pure (stripTrailingCommentLines fmt.pretty.trimRight)
-      catch _ =>
-        -- If pretty-printing fails, fall back to the original text
-        pure (stripTrailingCommentLines (stx.reprint.getD "").trimRight)
-      parts := parts.push formatted
-      prevTailPos := stx.getTailPos?
-    let newText := String.join parts.toList
-    let endPos := text.utf8PosToLspPos text.source.rawEndPos
-    let fullRange : Range := ⟨⟨0, 0⟩, endPos⟩
-    return #[{ range := fullRange, newText }]
+    formatCommandRange doc text initSnap headerParsed headerSuccess
+      0 text.source.rawEndPos
+
+/-- Handle `textDocument/rangeFormatting`: format only commands overlapping the given range. -/
+def handleDocumentRangeFormatting (p : DocumentRangeFormattingParams)
+    : RequestM (RequestTask (Array TextEdit)) := do
+  let doc ← readDoc
+  let text := doc.meta.text
+  let initSnap := doc.initSnap
+  let some headerParsed := initSnap.result?
+    | return ServerTask.pure (.error (RequestError.internalError "header parsing failed"))
+  let headerProcessedTask := headerParsed.processedSnap.task.asServerTask
+  mapTaskCostly headerProcessedTask fun headerProcessed => do
+    let some headerSuccess := headerProcessed.result?
+      | throw ⟨.internalError, "import processing failed"⟩
+    let rangeStart := text.lspPosToUtf8Pos p.range.start
+    let rangeEnd := text.lspPosToUtf8Pos p.range.«end»
+    formatCommandRange doc text initSnap headerParsed headerSuccess
+      rangeStart rangeEnd
 
 def handleDocumentColor (_ : DocumentColorParams) :
     RequestM (RequestTask (Array ColorInformation)) :=
@@ -657,6 +694,11 @@ builtin_initialize
     DocumentFormattingParams
     (Array TextEdit)
     handleDocumentFormatting
+  registerLspRequestHandler
+    "textDocument/rangeFormatting"
+    DocumentRangeFormattingParams
+    (Array TextEdit)
+    handleDocumentRangeFormatting
   registerLspRequestHandler
     "textDocument/documentColor"
     DocumentColorParams

@@ -112,6 +112,7 @@ structure ServerCapabilities where
   signatureHelpProvider?    : Option SignatureHelpOptions    := none
   colorProvider?            : Option DocumentColorOptions    := none
   documentFormattingProvider : Bool                          := false
+  documentRangeFormattingProvider : Bool                     := false
   experimental?             : Option LeanServerCapabilities  := none
   deriving ToJson, FromJson
 

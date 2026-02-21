@@ -126,6 +126,9 @@ instance : FileSource DocumentColorParams where
 instance : FileSource DocumentFormattingParams where
   fileSource p := fileSource p.textDocument
 
+instance : FileSource DocumentRangeFormattingParams where
+  fileSource p := fileSource p.textDocument
+
 /--
 Yields the file source of `item` by attempting to obtain `mod : Name` from `item.data?`. \
 Panics if `item.data?` is not present or does not contain a `mod` field and the first element of a

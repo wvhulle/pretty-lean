@@ -734,5 +734,11 @@ structure DocumentFormattingParams where
   options : FormattingOptions
   deriving FromJson, ToJson
 
+structure DocumentRangeFormattingParams where
+  textDocument : TextDocumentIdentifier
+  range : Range
+  options : FormattingOptions
+  deriving FromJson, ToJson
+
 end Lsp
 end Lean
