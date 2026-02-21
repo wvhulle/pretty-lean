@@ -548,23 +548,29 @@ private def formatCommandRange
     (rangeStart rangeEnd : String.Pos.Raw)
     : EIO RequestError (Array TextEdit) := do
   -- Collect all parsed command syntax by walking the CommandParsedSnapshot chain.
-  let mut stxs : Array Syntax := #[initSnap.stx]
+  let mut cmdStxs : Array Syntax := #[]
   let mut next? := some headerSuccess.firstCmdSnap
   repeat do
     match next? with
     | none => break
     | some snapshotTask =>
       let cmdParsed := snapshotTask.get
-      stxs := stxs.push cmdParsed.stx
+      cmdStxs := cmdStxs.push cmdParsed.stx
       next? := cmdParsed.nextCmdSnap?
   let headerSnap : Snapshots.Snapshot := {
     stx := initSnap.stx
     mpState := headerParsed.parserState
     cmdState := headerSuccess.cmdState
   }
+  -- Emit header (imports) verbatim — ppCommand would incorrectly indent it.
+  let headerStx := initSnap.stx
   let mut result : String := ""
-  let mut prevTailPos : Option String.Pos.Raw := none
-  for stx in stxs do
+  let headerOriginal := match headerStx.getPos?, headerStx.getTailPos? with
+    | some s, some e => String.Pos.Raw.extract text.source s e
+    | _, _ => headerStx.reprint.getD ""
+  result := result ++ headerOriginal.trimAsciiEnd.copy
+  let mut prevTailPos := headerStx.getTailPos?
+  for stx in cmdStxs do
     match prevTailPos, stx.getPos? with
     | some prevEnd, some curStart =>
       let gap := String.Pos.Raw.extract text.source prevEnd curStart
