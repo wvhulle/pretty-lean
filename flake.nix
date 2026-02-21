@@ -176,16 +176,17 @@
               stdenv = pkgs.overrideCC stdenv pkgs.llvmPackages.clang;
             })
               {
-                buildInputs = [
-                  pkgs.cmake
-                  pkgs.gmp
-                  pkgs.libuv
-                  pkgs.ccache
-                  pkgs.pkg-config
-                  pkgs.llvmPackages.bintools
-                  pkgs.llvmPackages.llvm
-                  pkgs.gdb
-                  pkgs.tree
+                buildInputs = with pkgs; [
+                  cmake
+                  gmp
+                  libuv
+                  python3
+                  ccache
+                  pkg-config
+                  llvmPackages.bintools
+                  llvmPackages.llvm
+                  gdb
+                  tree
                 ];
                 hardeningDisable = [ "all" ];
                 MAKEFLAGS = "-j$(nproc)";

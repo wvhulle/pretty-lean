@@ -482,6 +482,41 @@ partial def handleWaitForDiagnostics (p : WaitForDiagnosticsParams)
     return doc.reporter.bindCheap (fun _ => doc.cmdSnaps.waitAll)
       |>.mapCheap fun _ => pure WaitForDiagnostics.mk
 
+/-- Strip trailing lines that are pure comments or blank from ppCommand output.
+The formatter's `pushToken` preserves trailing `SourceInfo` comments at incorrect
+indentation (nested under the last expression). The gap extraction re-includes them
+at their correct original indentation. -/
+private partial def stripTrailingCommentLines (s : String) : String :=
+  -- Walk forward, tracking the end position of the last line that has real content
+  -- (not just whitespace or a line comment).
+  go 0 false false false 0
+where
+  go (i : String.Pos.Raw) (lineHasContent : Bool) (sawDash : Bool)
+     (inComment : Bool) (lastContentEnd : String.Pos.Raw) : String :=
+    if i < s.rawEndPos then
+      let c := String.Pos.Raw.get s i
+      let next := String.Pos.Raw.next s i
+      if c == '\n' then
+        let lastContentEnd' := if lineHasContent then next else lastContentEnd
+        go next false false false lastContentEnd'
+      else if inComment then
+        -- Inside a line comment, skip until newline
+        go next lineHasContent false true lastContentEnd
+      else if sawDash && c == '-' then
+        -- Saw "--", enter comment mode for rest of line
+        go next lineHasContent false true lastContentEnd
+      else if c == '-' then
+        go next lineHasContent true false lastContentEnd
+      else if c == ' ' || c == '\t' then
+        go next lineHasContent false false lastContentEnd
+      else
+        -- Real content on this line
+        go next true false false lastContentEnd
+    else
+      -- End of string: if current line has content, include everything
+      if lineHasContent then s
+      else String.Pos.Raw.extract s 0 lastContentEnd
+
 /-- Collapse runs of 3+ consecutive newlines down to 2 (at most one blank line). -/
 private partial def collapseBlankLines (s : String) : String :=
   go 0 0 ""
@@ -539,10 +574,10 @@ def handleDocumentFormatting (_ : DocumentFormattingParams)
       | _, none => parts := parts.push "\n"  -- fallback
       let formatted ← try
         let fmt ← headerSnap.runCoreM doc.meta (PrettyPrinter.ppCommand ⟨stx⟩)
-        pure fmt.pretty.trimRight
+        pure (stripTrailingCommentLines fmt.pretty.trimRight)
       catch _ =>
         -- If pretty-printing fails, fall back to the original text
-        pure (stx.reprint.getD "").trimRight
+        pure (stripTrailingCommentLines (stx.reprint.getD "").trimRight)
       parts := parts.push formatted
       prevTailPos := stx.getTailPos?
     let newText := String.join parts.toList

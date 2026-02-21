@@ -626,6 +626,13 @@ def processInlayHints : RunnerM Unit := do
   }
   logResponse "textDocument/inlayHint" p
 
+def processFormatting : RunnerM Unit := do
+  let p : DocumentFormattingParams := {
+    textDocument := { uri := (← get).uri }
+    options := { tabSize := 2, insertSpaces := true }
+  }
+  logResponse "textDocument/formatting" p (Array TextEdit)
+
 def processGenericRequest : RunnerM Unit := do
   let s ← get
   let Except.ok params := Json.parse s.params
@@ -670,6 +677,7 @@ def processDirective (ws directive : String) (directiveTargetLineNo : Nat) : Run
   | "moduleHierarchyImports" => processModuleHierarchyImports
   | "moduleHierarchyImportedBy" => processModuleHierarchyImportedBy
   | "inlayHints" => processInlayHints
+  | "formatting" => processFormatting
   | _ => processGenericRequest
 
 def processLine (line : String) : RunnerM Unit := do
