@@ -4,6 +4,7 @@ Fork of the [official Lean repo](https://github.com/leanprover/lean4) with some 
 
 - Improved caching in `flake.nix` for [Nix package manager](https://wiki.nixos.org/wiki/Flake) users: separated `stage0` (C-only) and `stage1` (Lean) build
 - Installation of standalone Lake binaries with `lake install`
+- Lean formatter integrated with LSP server
 
 Available binaries:
 
@@ -36,6 +37,76 @@ Add this repo as a Flake input to any of your Flake-based Nix projects:
 ```
 
 ## Usage
+
+### As Flake Input
+
+Just add a `flake.nix` with this repo as input.
+
+```nix
+{
+
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    lean4.url = "github:wvhulle/lean4";
+    lean4-nix.url = "github:lenianiva/lean4-nix";
+  };
+
+  outputs =
+    {
+      self,
+      nixpkgs,
+      lean4,
+      lean4-nix,
+    }:
+    let
+      system = "x86_64-linux";
+      pkgs = import nixpkgs {
+        inherit system;
+        config.allowUnfree = true;
+      };
+
+      lake2nix = pkgs.callPackage lean4-nix.lake {
+        lean = {
+          lean-all = lean4.packages.${system}.lake;
+        };
+      };
+
+    in
+    {
+      packages.${system}.default = lake2nix.mkPackage {
+        name = "lean-prism";
+        src = ./.;
+      };
+
+      devShells.${system} = {
+        default = pkgs.mkShell {
+          packages = with pkgs; [
+            lean4.packages.${system}.lake
+          ];
+
+        };
+
+        # Optional: only if you have a local checkout of the lean4 repo.
+        # Use locally-built lean4 — no flake rebuild on source changes.
+        # Requires: make -j -C ../lean4/build/release
+        local = pkgs.mkShell {
+          packages = with pkgs; [
+            gcc
+            llvmPackages.bintools
+          ];
+
+          shellHook = ''
+            export PATH="$PWD/../lean4/build/release/stage1/bin:$PATH"
+          '';
+        };
+      };
+    };
+}
+```
+
+When you launch your editor and a Lean LSP client, it should get automatic formatting support.
+
+### Without Installation
 
 Run the Lean binaries directly without installing them permanently:
 
