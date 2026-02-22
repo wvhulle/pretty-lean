@@ -195,6 +195,9 @@
                 MAKEFLAGS = "-j$(nproc)";
                 CTEST_OUTPUT_ON_FAILURE = 1;
                 STAGE0 = stage0;
+                # Use ccache by name so cmake doesn't cache absolute nix store paths
+                CMAKE_C_COMPILER_LAUNCHER = "ccache";
+                CMAKE_CXX_COMPILER_LAUNCHER = "ccache";
               };
         }
       );
