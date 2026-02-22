@@ -108,7 +108,7 @@ public structure Job (α : Type u) where
   [kind : OptDataKind α]
   /--
   A caption for the job in Lake's build monitor.
-  Will be formatted like `✔ [3/5] Ran <caption>`.
+  Will be formatted like `[3/5] Ran <caption>`.
   -/
   caption : String
   /-- Whether this job failing should cause the build to fail. -/

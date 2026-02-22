@@ -1,12 +1,21 @@
-# Lean - Nix Edition
+# Lean
 
-Fork of the [official Lean repo](https://github.com/leanprover/lean4) with some minor changes (for easy testing):
+**Fork of the [official Lean repo](https://github.com/leanprover/lean4) focused on making life easier for terminal-only Lean developers.**
 
-- Improved caching in `flake.nix` for [Nix package manager](https://wiki.nixos.org/wiki/Flake) users: separated `stage0` (C-only) and `stage1` (Lean) build
-- Installation of standalone Lake binaries with `lake install`
+Features added compared to upstream:
+
+- Installation of standalone Lake binaries with `lake install` and `lake install --git`
 - Lean formatter integrated with LSP server
+- Notifications instead of diagnostics during LSP server setup
+- Concise error messages when lake build at LSP setup fails
 
-Available binaries:
+Improvements for reproducible builds and development shell:
+
+- Build stage caching in `flake.nix` for [Nix package manager](https://wiki.nixos.org/wiki/Flake) users: separated `stage0` (C-only) and `stage1` (Lean) build
+- Configuration of `ccache` in Nix `devshell`
+- Added public shared cache for stage compilation artifacts
+
+The Nix flake outputs the same binaries as upstream, but just packages that in isolated Nix packages:
 
 | Package       | Description                                    |
 | ------------- | ---------------------------------------------- |

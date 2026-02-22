@@ -411,10 +411,10 @@ def setupImports
   let header := stx.toModuleHeader
   chanOut.sync.send <| .ofMsg <| mkIleanHeaderInfoNotification doc <| collectImports stx
   let fileSetupResult ← setupFile doc header fun stderrLine => do
+    let line := stderrLine.trimAsciiEnd.toString
     if useProgress then
-      let cleanLine := (stderrLine.trimAsciiEnd.toString.dropPrefix "✔ " |>.dropPrefix "✗ ").toString
       chanOut.sync.send <| .ofMsg <| mkProgressReportNotification progressToken
-          (message? := some cleanLine)
+          (message? := some line)
     else
       let progressDiagnostic := {
         range      := ⟨⟨0, 0⟩, ⟨1, 0⟩⟩

@@ -53,12 +53,17 @@ private structure MonitorContext where
 @[inline] def MonitorContext.logger (ctx : MonitorContext) : MonadLog BaseIO :=
   .stream ctx.out ctx.outLv ctx.useAnsi
 
+/-- A recorded build failure with its associated error messages. -/
+public structure JobFailure where
+  caption : String
+  errors : Array String
+
 /-- State of the Lake build monitor. -/
 private structure MonitorState where
   jobNo : Nat := 0
   totalJobs : Nat := 0
   wantsRebuild : Bool := false
-  failures : Array String
+  failures : Array JobFailure
   resetCtrl : String
   lastUpdate : Nat
   spinnerIdx : Fin Monitor.spinnerFrames.size := ⟨0, by decide⟩
@@ -121,20 +126,22 @@ private def reportJob (job : OpaqueJob) : MonitorM PUnit := do
   let maxLv := log.maxLv
   let failed := strictAnd log.hasEntries (maxLv ≥ failLv)
   if failed && !optional then
+    let errors := log.entries.filterMap fun e =>
+      if e.level ≥ .error then some e.message else none
     modify fun s => {s with
-      failures := s.failures.push caption
+      failures := s.failures.push { caption, errors }
       wantsRebuild := s.wantsRebuild || wantsRebuild
     }
-  let hasOutput := failed || (log.hasEntries && maxLv ≥ outLv)
+  let inSummary := failed && !optional
+  let hasOutput := (failed && !inSummary) || (log.hasEntries && maxLv ≥ outLv)
   let showJob :=
-    (!optional || showOptional) &&
+    (!optional || showOptional) && !inSummary &&
     (hasOutput || (showProgress && !useAnsi && action ≥ minAction))
   if showJob then
     let verb := action.verb failed
-    let icon := if hasOutput then maxLv.icon else '✔'
     let opt := if optional then " (Optional)" else ""
     let time := if showTime && buildTime > 0 then s!" ({formatTime buildTime})" else ""
-    let caption := s!"{icon} [{jobNo}/{totalJobs}]{opt} {verb} {caption}{time}"
+    let caption := s!"[{jobNo}/{totalJobs}]{opt} {verb} {caption}{time}"
     let caption :=
       if useAnsi then
         let color := if hasOutput then maxLv.ansiColor else "32"
@@ -144,7 +151,6 @@ private def reportJob (job : OpaqueJob) : MonitorM PUnit := do
     let resetCtrl ← modifyGet fun s => (s.resetCtrl, {s with resetCtrl := ""})
     print s!"{resetCtrl}{caption}\n"
     if hasOutput then
-      let outLv := if failed then .trace else outLv
       log.replay (logger := .stream out outLv useAnsi)
     flush
 where
@@ -197,11 +203,23 @@ end Monitor
 /-- **For internal use only.** -/
 public structure MonitorResult where
   wantsRebuild : Bool
-  failures : Array String
+  failures : Array JobFailure
   numJobs : Nat
 
 @[inline] def MonitorResult.isOk (self : MonitorResult) : Bool :=
   self.failures.isEmpty
+
+/-- Format the failure summary as a plain-text string. -/
+public def MonitorResult.failureSummary (self : MonitorResult) : String := Id.run do
+  let mut s := "Some required targets logged failures:\n"
+  for failure in self.failures do
+    if failure.errors.isEmpty then
+      s := s ++ s!"- {failure.caption}\n"
+    else
+      s := s ++ s!"{failure.caption}:\n"
+      for error in failure.errors do
+        s := s ++ s!"  {error}\n"
+  return s
 
 def mkMonitorContext (cfg : BuildConfig) (jobs : JobQueue) : BaseIO MonitorContext := do
   let out ← cfg.out.get
@@ -222,7 +240,7 @@ def mkMonitorContext (cfg : BuildConfig) (jobs : JobQueue) : BaseIO MonitorConte
 def monitorJobs'
   (ctx : MonitorContext)
   (initJobs : Array OpaqueJob)
-  (initFailures : Array String := #[])
+  (initFailures : Array JobFailure := #[])
   (resetCtrl : String := "")
 : BaseIO MonitorResult := do
   let s := {
@@ -247,7 +265,7 @@ public def monitorJobs
   (minAction : JobAction)
   (showOptional useAnsi showProgress showTime : Bool)
   (resetCtrl : String := "")
-  (initFailures : Array String := #[])
+  (initFailures : Array JobFailure := #[])
   (updateFrequency := 100)
 : BaseIO MonitorResult := do
   let ctx := {
@@ -290,11 +308,10 @@ def reportResult (cfg : BuildConfig) (out : IO.FS.Stream) (result : MonitorResul
       else
         print! out s!"Build completed successfully ({jobs}).\n"
   else
-    print! out "Some required targets logged failures:\n"
-    result.failures.forM (print! out s!"- {·}\n")
+    print! out result.failureSummary
     flush out
 
-structure BuildResult (α : Type u) extends MonitorResult where
+public structure BuildResult (α : Type u) extends MonitorResult where
   out : Except String α
 
 instance : CoeOut (BuildResult α) MonitorResult := ⟨BuildResult.toMonitorResult⟩
@@ -391,6 +408,19 @@ public def Workspace.runBuild
   let job ← ws.startBuild cfg jobs build
   let result ← monitorBuild mctx job
   ws.finalizeBuild cfg mctx result
+
+/--
+Run a build and return the raw `BuildResult` without reporting or finalizing.
+The caller is responsible for inspecting `BuildResult.failures` and handling output.
+Used by `setup-file` to send structured error information on stdout.
+-/
+public def Workspace.runBuildRaw
+  (ws : Workspace) (build : FetchM (Job α)) (cfg : BuildConfig := {})
+: BaseIO (BuildResult α) := do
+  let jobs ← mkJobQueue
+  let mctx ← mkMonitorContext cfg jobs
+  let job ← ws.startBuild cfg jobs build
+  monitorBuild mctx job
 
 /-- Produce a build job in the Lake monad's workspace and await the result. -/
 @[inline] public def runBuild

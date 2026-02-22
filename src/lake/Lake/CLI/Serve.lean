@@ -63,13 +63,15 @@ public def setupFile
     let some ws ← loadWorkspace loadConfig |>.toBaseIO buildConfig.toLogConfig
       | eprint! "Failed to load the Lake workspace.\n"
         return 1
-    let setup := ws.runBuild (cfg := buildConfig) do
+    let result ← ws.runBuildRaw (cfg := buildConfig) do
       setupServerModule leanFile.toString path header?
-    match (← setup.toBaseIO) with
+    match result.out with
     | .ok setup =>
       print! (toJson setup).compress
-    | .error _ =>
-      eprint! "Failed to build module dependencies.\n"
+    | .error msg =>
+      let summary := if result.failures.isEmpty then msg
+        else result.toMonitorResult.failureSummary.trimAsciiEnd.toString
+      IO.println summary |>.catchExceptions fun _ => pure ()
       return 1
 where
   print! msg := do

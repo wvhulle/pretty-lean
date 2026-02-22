@@ -42,14 +42,14 @@ partial def runLakeSetupFile
   let (stdin, lakeProc) ← lakeProc.takeStdin
   stdin.putStrLn (toJson header).compress
 
-  let rec processStderr (acc : String) : IO String := do
+  let rec drainStderr (acc : String) : IO String := do
     let line ← lakeProc.stderr.getLine
     if line == "" then
       return acc
     else
       handleStderr line
-      processStderr (acc ++ line)
-  let stderr ← ServerTask.IO.asTask (processStderr "")
+      drainStderr (acc ++ line)
+  let stderr ← ServerTask.IO.asTask (drainStderr "")
 
   let stdout := String.trimAscii (← lakeProc.stdout.readToEnd) |>.copy
   let stderr ← IO.ofExcept stderr.get
@@ -107,12 +107,10 @@ partial def setupFile (m : DocumentMeta) (header : ModuleHeader) (handleStderr :
 
   let result ← runLakeSetupFile m lakePath filePath header handleStderr
 
-  let cmdStr := " ".intercalate (toString result.spawnArgs.cmd :: result.spawnArgs.args.toList)
-
   match result.exitCode with
   | 0 =>
     let Except.ok (setup : ModuleSetup) := Json.parse result.stdout >>= fromJson?
-      | return ← FileSetupResult.ofError m header s!"Invalid output from `{cmdStr}`:\n{result.stdout}\nstderr:\n{result.stderr}"
+      | return ← FileSetupResult.ofError m header s!"Invalid lake setup-file output:\n{result.stdout}"
     setup.dynlibs.forM loadDynlib
     FileSetupResult.ofSuccess setup
   | 2 => -- exit code for lake reporting that there is no lakefile
@@ -120,4 +118,11 @@ partial def setupFile (m : DocumentMeta) (header : ModuleHeader) (handleStderr :
   | 3 => -- exit code for `--no-build`
     FileSetupResult.ofImportsOutOfDate m header
   | _ =>
-    FileSetupResult.ofError m header s!"`{cmdStr}` failed:\n{result.stdout}\nstderr:\n{result.stderr}"
+    -- Prefer structured error from stdout (sent by Lake on build failure);
+    -- fall back to stderr for errors that occur before the build starts.
+    let stdout := result.stdout.trimAsciiEnd.toString
+    let msg := if stdout.isEmpty then
+      let stderr := result.stderr.trimAsciiEnd.toString
+      if stderr.isEmpty then "lake setup-file failed" else stderr
+    else stdout
+    FileSetupResult.ofError m header msg
