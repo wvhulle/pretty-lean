@@ -869,6 +869,8 @@ section ServerM
         | .notification "$/lean/importClosure" =>
           if let .ok params := parseNotificationParams? LeanImportClosureParams msg then
             handleImportClosure fw params
+        | .notification "$/progress" =>
+          writeSerializedMessage msg
         | _ =>
           writeSerializedMessage msg
 
