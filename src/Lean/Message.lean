@@ -422,6 +422,9 @@ structure BaseMessage (α : Type u) where
   caption       : String          := ""
   /-- The content of the message. -/
   data          : α
+  /-- Optional JSON-encoded data for LSP `Diagnostic.data?`.
+  Stored as a string because `Message.lean` is in the prelude (no `Json`). -/
+  diagnosticData? : Option String := none
   deriving Inhabited, ToJson, FromJson
 
 /-- A `Message` is a richly formatted piece of information emitted by Lean.

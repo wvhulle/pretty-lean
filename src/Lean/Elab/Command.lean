@@ -257,8 +257,6 @@ def runLinters (stx : Syntax) : CommandElabM Unit := do
               | Exception.internal _ _ =>
                 logException ex
             finally
-              -- TODO: it would be good to preserve even more state (#4363) but preserving info
-              -- trees currently breaks from linters adding context-less info nodes
               modify fun s => { savedState with messages := s.messages, traceState := s.traceState }
 
 /--
