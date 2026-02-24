@@ -8,6 +8,7 @@ Features added compared to upstream:
 - Lean formatter integrated with LSP server
 - Notifications instead of diagnostics during LSP server setup
 - Concise error messages when lake build at LSP setup fails
+- Opening up of diagnostic fix creation by users for better linters
 
 Improvements for reproducible builds and development shell:
 
@@ -15,15 +16,23 @@ Improvements for reproducible builds and development shell:
 - Configuration of `ccache` in Nix `devshell`
 - Added public shared cache for stage compilation artifacts
 
-The Nix flake outputs the same binaries as upstream, but just packages that in isolated Nix packages:
+<!--toc:start-->
 
-| Package       | Description                                    |
-| ------------- | ---------------------------------------------- |
-| `lean`        | Lean compiler (alias for `stage1`)             |
-| `lake`        | Lake build tool (same derivation, runs `lake`) |
-| `leanc`       | Lean C compiler wrapper                        |
-| `leanchecker` | Lean proof checker                             |
-| `leanmake`    | Lean make tool                                 |
+- [Lean](#lean)
+  - [Installation](#installation)
+  - [Usage](#usage)
+    - [As Flake Input](#as-flake-input)
+    - [Without Installation](#without-installation)
+  - [Development](#development)
+    - [Structure](#structure)
+    - [Building for Nix](#building-for-nix)
+    - [Caching `stage0` with Nix](#caching-stage0-with-nix)
+    - [Development Builds](#development-builds)
+    - [Testing](#testing)
+    - [Ignoring Nix `stage0` Cache](#ignoring-nix-stage0-cache)
+  - [Related](#related)
+
+<!--toc:end-->
 
 ## Installation
 
@@ -113,7 +122,16 @@ Just add a `flake.nix` with this repo as input.
 }
 ```
 
-When you launch your editor and a Lean LSP client, it should get automatic formatting support.
+The Nix flake outputs the same binaries as upstream, but just packages that in isolated Nix packages:
+
+| Package                                                                                        | Description                                    |
+| ---------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| `lean`                                                                                         | Lean compiler (alias for `stage1`)             |
+| `lake`                                                                                         | Lake build tool (same derivation, runs `lake`) |
+| `leanc`                                                                                        | Lean C compiler wrapper                        |
+| `leanchecker`                                                                                  | Lean proof checker                             |
+| `leanmake`                                                                                     | Lean make tool                                 |
+| When you launch your editor and a Lean LSP client, it should get automatic formatting support. |                                                |
 
 ### Without Installation
 
@@ -224,3 +242,4 @@ This project primarily serves as an easy way for me to hack on the upstream Lean
 Try some of my other Lean projects:
 
 - [Lean-TUI](https://codeberg.org/wvhulle/lean-tui): terminal-only info view for proof visualization
+- [Heron](https://codeberg.org/wvhulle/heron): comprehensive linter and auto-fixer for Lean

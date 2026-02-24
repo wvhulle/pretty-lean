@@ -36,18 +36,13 @@ structure CodeActionResolveData where
   providerResultIndex : Nat
   deriving ToJson, FromJson
 
-def CodeAction.getFileSource! (ca : CodeAction) : FileIdent :=
-  let r : Except String FileIdent := do
-    let some data := ca.data?
-      | throw s!"no data param on code action {ca.title}"
-    let data : CodeActionResolveData ← fromJson? data
-    return .uri data.params.textDocument.uri
-  match r with
-  | Except.ok uri => uri
-  | Except.error e => panic! e
+def CodeAction.getFileSource? (ca : CodeAction) : Option FileIdent := do
+  let data ← ca.data?
+  let data : CodeActionResolveData ← (fromJson? data).toOption
+  return .uri data.params.textDocument.uri
 
 instance : FileSource CodeAction where
-  fileSource x := CodeAction.getFileSource! x
+  fileSource? := CodeAction.getFileSource?
 
 
 instance : Coe CodeAction LazyCodeAction where
@@ -134,13 +129,13 @@ def handleCodeAction (params : CodeActionParams) : RequestM (RequestTask (Array 
         RequestM.checkCancelled
         let cas ← cap params snap
         cas.mapIdxM fun i lca => do
-          if lca.lazy?.isNone then return lca.eager
+          -- Always add routing data so `codeAction/resolve` can be routed
+          -- to the correct file worker, even for non-lazy code actions.
           let data : CodeActionResolveData := {
             params, providerName, providerResultIndex := i
           }
           let j : Json := toJson data
-          let ca := { lca.eager with data? := some j }
-          return ca
+          return { lca.eager with data? := some j }
 
 builtin_initialize
   registerLspRequestHandler "textDocument/codeAction" CodeActionParams (Array CodeAction) handleCodeAction
@@ -165,7 +160,7 @@ def handleCodeActionResolve (param : CodeAction) : RequestM (RequestTask CodeAct
       let some ca := cas[data.providerResultIndex]?
         | throw <| RequestError.internalError s!"Failed to resolve code action index {data.providerResultIndex}."
       let some lazy := ca.lazy?
-        | throw <| RequestError.internalError s!"Can't resolve; nothing further to resolve."
+        | return ca.eager  -- Non-lazy: nothing to resolve, return as-is
       let r ← liftM lazy
       return r
 

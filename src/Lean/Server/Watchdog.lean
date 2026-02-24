@@ -1355,7 +1355,9 @@ section NotificationHandling
 
   def forwardNotification {α : Type} [ToJson α] [FileSource α] (method : String) (params : α)
       : ServerM Unit :=
-    tryWriteMessage (fileSource params) (Notification.mk method params)
+    match fileSource? params with
+    | some fi => tryWriteMessage fi (Notification.mk method params)
+    | none => return
 end NotificationHandling
 
 section MessageHandling
@@ -1363,7 +1365,12 @@ section MessageHandling
     let fileId : FileIdent ←
       if method == "$/lean/rpc/connect" then
         let ps ← parseParams Lsp.RpcConnectParams params
-        pure <| fileSource ps
+        match fileSource? ps with
+        | some fi => pure fi
+        | none =>
+          writeMessage <| (RequestError.invalidParams
+            s!"could not determine file source for '{method}'").toLspResponseError id
+          return
       else
         match (← routeLspRequest method params) with
         | Except.error e =>

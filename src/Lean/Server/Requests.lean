@@ -515,8 +515,11 @@ def registerLspRequestHandler (method : String)
     throw <| IO.userError s!"Failed to register LSP request handler for '{method}': only possible during initialization"
   if (← requestHandlers.get).contains method then
     throw <| IO.userError s!"Failed to register LSP request handler for '{method}': already registered"
-  let fileSource := fun j =>
-    parseRequestParams paramType j |>.map Lsp.fileSource
+  let fileSource := fun j => do
+    let params ← parseRequestParams paramType j
+    match Lsp.fileSource? params with
+    | some fi => .ok fi
+    | none => .error (.invalidParams s!"could not determine file source for '{method}'")
   let handle := fun j => do
     let params ← RequestM.parseRequestParams paramType j
     let t ← handler params
@@ -643,8 +646,11 @@ private def overrideStatefulLspRequestHandler
     : IO Unit := do
   if !(← Lean.initializing) then
     throw <| IO.userError s!"Failed to register stateful LSP request handler for '{method}': only possible during initialization"
-  let fileSource := fun j =>
-    parseRequestParams paramType j |>.map Lsp.fileSource
+  let fileSource := fun j => do
+    let params ← parseRequestParams paramType j
+    match Lsp.fileSource? params with
+    | some fi => .ok fi
+    | none => .error (.invalidParams s!"could not determine file source for '{method}'")
   let lastTaskMutex ← Std.Mutex.new <| ServerTask.pure ()
   let initState := Dynamic.mk initState
   let stateRef ← IO.mkRef initState
