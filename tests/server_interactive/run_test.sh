@@ -9,5 +9,6 @@ capture_only "$1" \
   lean -Dlinter.all=false --run run_test.lean "$1"
 normalize_mvar_suffixes
 normalize_reference_urls
+normalize_source_urls
 check_out_file
 check_exit_is "${TEST_EXIT:-0}"
