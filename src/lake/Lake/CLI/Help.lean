@@ -36,6 +36,7 @@ COMMANDS:
   pack                  pack build artifacts into an archive for distribution
   unpack                unpack build artifacts from an distributed archive
   upload <tag>          upload build artifacts to a GitHub release
+  install <targets>...  install executables globally to ~/.lake/bin
   cache                 manage the Lake cache
   script                manage and run workspace scripts
   scripts               shorthand for `lake script list`
@@ -701,6 +702,29 @@ already exists, Lake will error.
 Translation is lossy. It does not preserve comments or formatting and
 non-declarative configuration will be discarded."
 
+def helpInstall :=
+"Install a package's executables globally
+
+USAGE:
+  lake install [--git <url> [--branch <branch> | --rev <rev>]] [<targets>...]
+
+Builds the specified executable targets (or all package executables if none
+specified) and installs them to ~/.lake/bin/.
+
+OPTIONS:
+  --git <url>       Install from a Git repository URL
+  --branch <branch> Branch to use when installing from git
+  --rev <rev>       Specific commit or tag to use when installing from git
+
+EXAMPLES:
+  lake install                              Install from current project
+  lake install myexe                        Install specific executable
+  lake install --git <url>                  Install from a Git repository
+  lake install --git <url> --branch dev     Install from a specific branch
+  lake install --git <url> --rev v1.0.0     Install from a tag or commit
+
+Tip: Add ~/.lake/bin to your PATH to use installed executables directly."
+
 public def helpScript : (cmd : String) → String
 | "list"                => helpScriptList
 | "run"                 => helpScriptRun
@@ -728,6 +752,7 @@ public def help : (cmd : String) → String
 | "pack"                => helpPack
 | "unpack"              => helpUnpack
 | "upload"              => helpUpload
+| "install"             => helpInstall
 | "cache"               => helpCacheCli
 | "test"                => helpTest
 | "check-test"          => helpCheckTest
