@@ -727,9 +727,11 @@ endif()
 add_subdirectory(initialize)
 add_subdirectory(shell)
 
+option(LEAN_BUILD_TESTS "Configure the test suite. Disable for packaging builds that exclude tests/." ON)
+
 # The relative path doesn't work once the CMakeLists.txt files have been copied into the stage0 dir.
 # Since stage0 needs no tests, we just ignore them instead of fixing the path.
-if(NOT STAGE EQUAL 0)
+if(NOT STAGE EQUAL 0 AND LEAN_BUILD_TESTS)
   add_subdirectory(../tests "${CMAKE_CURRENT_BINARY_DIR}/tests")
 endif()
 
