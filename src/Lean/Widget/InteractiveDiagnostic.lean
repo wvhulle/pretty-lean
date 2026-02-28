@@ -256,6 +256,11 @@ def msgToInteractiveDiagnostic (text : FileMap) (m : Message) (hasWidgets : Bool
     | .ok msg => msg
     | .error ex => TaggedText.text s!"[error when printing message: {ex.toString}]"
   let code? := (errorNameOfKind? m.kind).map (.string ·.toString)
-  pure { range, fullRange? := some fullRange, severity?, source?, message, tags?, leanTags?, isSilent?, code? }
+  let data? := m.diagnosticData?.bind fun s =>
+    match Lean.Json.parse s with
+    | .ok j => some j
+    | .error _ => none
+  let relatedInformation? := m.relatedInformation?
+  pure { range, fullRange? := some fullRange, severity?, source?, message, tags?, leanTags?, isSilent?, code?, data?, relatedInformation? }
 
 end Lean.Widget

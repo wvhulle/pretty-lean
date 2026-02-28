@@ -11,6 +11,7 @@ prelude
 public import Init.Data.Slice.Array
 public import Lean.Util.PPExt
 public import Lean.Util.Sorry
+public import Lean.Data.Lsp.DiagnosticRelatedInformation
 import Init.Data.String.Search
 import Init.Data.Format.Macro
 import Init.Data.Iterators.Consumers.Collect
@@ -484,6 +485,13 @@ structure BaseMessage (α : Type u) where
   -/
   isSilent      : Bool := false
   caption       : String          := ""
+  /-- The content of the message. -/
+  data          : α
+  /-- Related diagnostic information surfaced via LSP `Diagnostic.relatedInformation`. -/
+  relatedInformation? : Option (Array Lsp.DiagnosticRelatedInformation) := none
+  /-- JSON-encoded payload propagated to LSP `Diagnostic.data?`. Used by tools
+  that attach structured hover data (see `DiagnosticHoverData`). -/
+  diagnosticData? : Option String := none
   /-- The content of the message. -/
   data          : α
   deriving Inhabited, ToJson, FromJson
