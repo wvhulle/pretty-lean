@@ -36,18 +36,13 @@ structure CodeActionResolveData where
   providerResultIndex : Nat
   deriving ToJson, FromJson
 
-def CodeAction.getFileSource! (ca : CodeAction) : DocumentUri :=
-  let r : Except String DocumentUri := do
-    let some data := ca.data?
-      | throw s!"no data param on code action {ca.title}"
-    let data : CodeActionResolveData ← fromJson? data
-    return data.params.textDocument.uri
-  match r with
-  | Except.ok uri => uri
-  | Except.error e => panic! e
+def CodeAction.getFileSource? (ca : CodeAction) : Option DocumentUri := do
+  let data ← ca.data?
+  let data : CodeActionResolveData ← (fromJson? data).toOption
+  return data.params.textDocument.uri
 
 instance : FileSource CodeAction where
-  fileSource x := CodeAction.getFileSource! x
+  fileSource? := CodeAction.getFileSource?
 
 
 instance : Coe CodeAction LazyCodeAction where
@@ -138,8 +133,7 @@ def handleCodeAction (params : CodeActionParams) : RequestM (RequestTask (Array 
             params, providerName, providerResultIndex := i
           }
           let j : Json := toJson data
-          let ca := { lca.eager with data? := some j }
-          return ca
+          return { lca.eager with data? := some j }
 
 builtin_initialize
   registerLspRequestHandler "textDocument/codeAction" CodeActionParams (Array CodeAction) handleCodeAction
