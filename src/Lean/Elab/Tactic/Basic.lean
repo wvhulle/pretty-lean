@@ -156,7 +156,8 @@ throwing `unsupportedSyntax`, which is not affected by this attribute.
 builtin_initialize noFallbackAttr : TagAttribute ←
   registerTagAttribute `no_fallback "disables automatic fallback on tactic macro/elab failure"
 
-def mkTacticInfo (mctxBefore : MetavarContext) (goalsBefore : List MVarId) (stx : Syntax) : TacticM Info :=
+def mkTacticInfo (mctxBefore : MetavarContext) (goalsBefore : List MVarId) (stx : Syntax)
+    (elapsedNs : Nat := 0) : TacticM Info :=
   return Info.ofTacticInfo {
     elaborator    := (← read).elaborator
     mctxBefore    := mctxBefore
@@ -164,12 +165,16 @@ def mkTacticInfo (mctxBefore : MetavarContext) (goalsBefore : List MVarId) (stx 
     stx           := stx
     mctxAfter     := (← getMCtx)
     goalsAfter    := (← getUnsolvedGoals)
+    elapsedNs
   }
 
 def mkInitialTacticInfo (stx : Syntax) : TacticM (TacticM Info) := do
   let mctxBefore  ← getMCtx
   let goalsBefore ← getUnsolvedGoals
-  return mkTacticInfo mctxBefore goalsBefore stx
+  let startNs     ← IO.monoNanosNow
+  return do
+    let endNs ← IO.monoNanosNow
+    mkTacticInfo mctxBefore goalsBefore stx (endNs - startNs)
 
 @[inline] def withTacticInfoContext (stx : Syntax) (x : TacticM α) : TacticM α := do
   withInfoContext x (← mkInitialTacticInfo stx)
