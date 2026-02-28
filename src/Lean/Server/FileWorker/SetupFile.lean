@@ -42,55 +42,131 @@ partial def runLakeSetupFile
   let (stdin, lakeProc) ← lakeProc.takeStdin
   stdin.putStrLn (toJson header).compress
 
-  let rec processStderr (acc : String) : IO String := do
+  let rec drainStderr (acc : String) : IO String := do
     let line ← lakeProc.stderr.getLine
     if line == "" then
       return acc
     else
       handleStderr line
-      processStderr (acc ++ line)
-  let stderr ← ServerTask.IO.asTask (processStderr "")
+      drainStderr (acc ++ line)
+  let stderr ← ServerTask.IO.asTask (drainStderr "")
 
   let stdout := String.trimAscii (← lakeProc.stdout.readToEnd) |>.copy
   let stderr ← IO.ofExcept stderr.get
   let exitCode ← lakeProc.wait
   return ⟨spawnArgs, exitCode, stdout, stderr⟩
 
-/-- Result of running `lake setup-file`. -/
-inductive FileSetupResult where
+/-- Structured error output from `lake setup-file` failure. -/
+structure LakeBuildError where
+  summary : String
+  buildDiagnostics : Array SerialMessage := #[]
+  failedTargets : Array String := #[]
+  deriving FromJson, ToJson
+
+/-- Categorizes possible outcomes of running `lake setup-file`. -/
+inductive FileSetupResultKind where
   /-- File configuration loaded and dependencies updated successfully. -/
-  | success (setup : ModuleSetup)
+  | success
   /-- No Lake project found, no setup was done. -/
   | noLakefile
   /-- Imports must be rebuilt but `--no-build` was specified. -/
   | importsOutOfDate
   /-- Other error during Lake invocation. -/
-  | error (msg : String)
+  | error (err : LakeBuildError)
+
+/-- Result of running `lake setup-file`. -/
+structure FileSetupResult where
+  /-- Kind of outcome. -/
+  kind        : FileSetupResultKind
+  /-- Configuration from a successful setup, or else the default. -/
+  setup       : ModuleSetup
+
+def FileSetupResult.ofSuccess (setup : ModuleSetup) : IO FileSetupResult := do return {
+  kind          := FileSetupResultKind.success
+  setup
+}
+
+def FileSetupResult.ofNoLakefile (m : DocumentMeta) (header : ModuleHeader) : FileSetupResult := {
+  kind          := FileSetupResultKind.noLakefile
+  setup         := {name := m.mod, isModule := header.isModule}
+}
+
+def FileSetupResult.ofImportsOutOfDate (m : DocumentMeta) (header : ModuleHeader) : IO FileSetupResult := do return {
+  kind          := FileSetupResultKind.importsOutOfDate
+  setup         := {name := m.mod, isModule := header.isModule}
+}
+
+def FileSetupResult.ofError (m : DocumentMeta) (header : ModuleHeader) (err : LakeBuildError)
+    : IO FileSetupResult := do return {
+  kind          := FileSetupResultKind.error err
+  setup         := {name := m.mod, isModule := header.isModule}
+}
+
+/-- Convert a 1-based Lean `Position` to a 0-based LSP `Position`. -/
+private def leanPositionToLsp (p : Position) : Lsp.Position :=
+  ⟨if p.line > 0 then p.line - 1 else 0, p.column⟩
+
+private scoped instance : Coe MessageSeverity Lsp.DiagnosticSeverity where
+  coe
+    | .error => .error
+    | .warning => .warning
+    | .information => .information
+
+/-- Convert a `SerialMessage` to an LSP diagnostic sourced from `"Lake"`. -/
+private def serialMessageToDiagnostic (msg : SerialMessage) : Lsp.Diagnostic :=
+  let startPos := leanPositionToLsp msg.pos
+  let endPos := msg.endPos.map leanPositionToLsp |>.getD ⟨startPos.line, startPos.character + 1⟩
+  let body := if msg.caption.trimAscii.isEmpty then msg.data.trimAscii.toString
+    else s!"{msg.caption.trimAscii}:\n{msg.data.trimAscii}"
+  { range := ⟨startPos, endPos⟩
+    severity? := some msg.severity
+    source? := some "Lake"
+    message := body }
+
+/-- Resolve a file name (possibly relative) to an absolute `DocumentUri`. -/
+private def resolveFileUri (fileName : String) : IO Lsp.DocumentUri := do
+  let path : System.FilePath := fileName
+  let absPath ← if path.isAbsolute then pure path else pure ((← IO.currentDir) / path)
+  let resolved ← try IO.FS.realPath absPath catch _ => pure absPath
+  return System.Uri.pathToUri resolved
+
+/-- Group `SerialMessage`s by file and convert to cross-file LSP diagnostics. -/
+def serialMessagesToCrossFileDiagnostics (msgs : Array SerialMessage)
+    : IO (Array (Lsp.DocumentUri × Array Lsp.Diagnostic)) := do
+  let grouped := msgs.groupByKey (·.fileName)
+  grouped.toArray.mapM fun (fileName, fileMsgs) => do
+    let uri ← resolveFileUri fileName
+    return (uri, fileMsgs.map serialMessageToDiagnostic)
 
 /-- Uses `lake setup-file` to compile dependencies on the fly and add them to `LEAN_PATH`.
 Compilation progress is reported to `handleStderr`. Returns the search path for
 source files and the options for the file. -/
 partial def setupFile (m : DocumentMeta) (header : ModuleHeader) (handleStderr : String → IO Unit) : IO FileSetupResult := do
   let some filePath := System.Uri.fileUriToPath? m.uri
-    | return FileSetupResult.noLakefile -- untitled files have no lakefile
+    | return FileSetupResult.ofNoLakefile m header -- untitled files have no lakefile
 
   let lakePath ← determineLakePath
   if !(← System.FilePath.pathExists lakePath) then
-    return FileSetupResult.noLakefile
+    return FileSetupResult.ofNoLakefile m header
 
   let result ← runLakeSetupFile m lakePath filePath header handleStderr
-
-  let cmdStr := " ".intercalate (toString result.spawnArgs.cmd :: result.spawnArgs.args.toList)
 
   match result.exitCode with
   | 0 =>
     let Except.ok (setup : ModuleSetup) := Json.parse result.stdout >>= fromJson?
-      | return FileSetupResult.error s!"Invalid output from `{cmdStr}`:\n{result.stdout}\nstderr:\n{result.stderr}"
+      | return ← FileSetupResult.ofError m header { summary := s!"Invalid lake setup-file output:\n{result.stdout}" }
     setup.dynlibs.forM loadDynlib
-    return FileSetupResult.success setup
+    FileSetupResult.ofSuccess setup
   | 2 => -- exit code for lake reporting that there is no lakefile
-    return FileSetupResult.noLakefile
+    return FileSetupResult.ofNoLakefile m header
   | 3 => -- exit code for `--no-build`
-    return FileSetupResult.importsOutOfDate
+    FileSetupResult.ofImportsOutOfDate m header
   | _ =>
-    return FileSetupResult.error s!"`{cmdStr}` failed:\n{result.stdout}\nstderr:\n{result.stderr}"
+    let stdout := result.stdout.trimAsciiEnd.toString
+    let err : LakeBuildError := (Json.parse stdout >>= fromJson?).toOption.getD {
+      summary := if stdout.isEmpty then
+        let stderr := result.stderr.trimAsciiEnd.toString
+        if stderr.isEmpty then "lake setup-file failed" else stderr
+      else stdout
+    }
+    FileSetupResult.ofError m header err

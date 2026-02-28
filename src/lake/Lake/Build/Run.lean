@@ -491,7 +491,8 @@ public def Workspace.runBuildRaw
 : BaseIO (BuildResult α) := do
   let jobs ← mkJobQueue
   let mctx ← mkMonitorContext cfg jobs
-  let job ← ws.startBuild cfg jobs build
+  let bctx ← mkBuildContext' ws cfg jobs
+  let job ← startBuild bctx build
   monitorBuild mctx job
 
 /-- Produce a build job in the Lake monad's workspace and await the result. -/

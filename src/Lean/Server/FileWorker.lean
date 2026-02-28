@@ -366,15 +366,27 @@ abbrev WorkerM := ReaderT WorkerContext <| StateRefT WorkerState IO
 private builtin_initialize importsLoadedRef : IO.Ref Bool ← IO.mkRef false
 
 open Language Lean in
+/-- Create a warning diagnostic covering only line 1. -/
+private def diagnosticsOfBuildWarning (msg : String) : BaseIO Language.Snapshot.Diagnostics :=
+  Language.Snapshot.Diagnostics.ofMessageLog <| MessageLog.empty.add {
+    fileName := "<input>"
+    pos := ⟨1, 0⟩
+    endPos := some ⟨2, 0⟩
+    severity := .warning
+    data := msg
+  }
+
+
+open Language Lean in
 /--
 Callback from Lean language processor after parsing imports that requests necessary information from
 Lake for processing imports.
 -/
 def setupImports
-    (doc         : DocumentMeta)
-    (cmdlineOpts : Options)
-    (chanOut     : Std.Channel OutputMessage)
-    (stx         : Elab.HeaderSyntax)
+    (doc                  : DocumentMeta)
+    (cmdlineOpts          : Options)
+    (chanOut              : Std.Channel OutputMessage)
+    (stx                  : Elab.HeaderSyntax)
     : Language.ProcessingT IO (Except Language.Lean.HeaderProcessedSnapshot SetupImportsResult) := do
   let importsAlreadyLoaded ← importsLoadedRef.modifyGet ((·, true))
   if importsAlreadyLoaded then
@@ -396,14 +408,14 @@ def setupImports
       message    := stderrLine
     }
     chanOut.sync.send <| .ofMsg <| mkPublishDiagnosticsNotification doc #[progressDiagnostic]
-  let isSetupError := fileSetupResult matches .importsOutOfDate
-    || fileSetupResult matches .error ..
+  let isSetupError := fileSetupResult.kind matches .importsOutOfDate
+    || fileSetupResult.kind matches .error ..
   chanOut.sync.send <| .ofMsg <|
     mkIleanHeaderSetupInfoNotification doc (collectImports stx) isSetupError
   -- clear progress notifications in the end
   chanOut.sync.send <| .ofMsg <| mkPublishDiagnosticsNotification doc #[]
   let setup ← do
-    match fileSetupResult with
+    match fileSetupResult.kind with
     | .importsOutOfDate =>
       return .error {
         diagnostics := (← Language.diagnosticsOfHeaderError
@@ -413,16 +425,30 @@ def setupImports
         metaSnap := default
         : Language.Lean.HeaderProcessedSnapshot
       }
-    | .error msg =>
-      return .error {
-        diagnostics := (← diagnosticsOfHeaderError msg)
-        result? := none
-        metaSnap := default
-      }
-    | .noLakefile =>
-      pure { name := doc.mod, isModule := header.isModule }
-    | .success setup =>
-      pure setup
+    | .error err =>
+      let crossFileDiags ← serialMessagesToCrossFileDiagnostics err.buildDiagnostics
+      for (uri, diags) in crossFileDiags do
+        chanOut.sync.send <| .ofMsg <| (⟨"textDocument/publishDiagnostics",
+          ({ uri, version? := none, diagnostics := diags } : PublishDiagnosticsParams)⟩ :
+          JsonRpc.Notification PublishDiagnosticsParams)
+      unless crossFileDiags.isEmpty do
+        -- Tell watchdog which URIs we published so it can clear them on restart
+        let uris := crossFileDiags.map (·.1)
+        chanOut.sync.send <| .ofMsg <| (⟨"$/lean/crossFileDiagnosticUris", uris⟩ :
+          JsonRpc.Notification (Array DocumentUri))
+        chanOut.sync.send <| .ofMsg <| (⟨"window/showMessage",
+          ({ type := .error,
+             message := s!"Lake build failed: {err.buildDiagnostics.size} error(s)"
+           } : ShowMessageParams)⟩ : JsonRpc.Notification ShowMessageParams)
+      let diagnostics ← if err.buildDiagnostics.isEmpty then
+          diagnosticsOfHeaderError err.summary
+        else
+          let targets := ", ".intercalate err.failedTargets.toList
+          diagnosticsOfBuildWarning s!"Lake build of target(s) {targets} failed"
+      return .error { diagnostics, result? := none, metaSnap := default }
+    | _ => pure ()
+
+  let setup := fileSetupResult.setup
 
   -- override cmdline options with file options
   let opts := cmdlineOpts.mergeBy (fun _ _ fileOpt => fileOpt) setup.options.toOptions
@@ -525,13 +551,12 @@ section Initialization
         o.writeSerializedLspMessage serialized |>.catchExceptions (fun _ => pure ())
       return chanOut
 
-    getImportClosure? (snap : Language.Lean.InitialSnapshot) : Array Name := Id.run do
-      let some snap := snap.result?
+    getImportClosure? (initSnap : Language.Lean.InitialSnapshot) : Array Name := Id.run do
+      let some parsed := initSnap.result?
         | return #[]
-      let some snap ← snap.processedSnap.get.result?
-        | return #[]
-      let importClosure := snap.cmdState.env.allImportedModuleNames
-      return importClosure
+      let some processed ← parsed.processedSnap.get.result?
+        | return (Elab.HeaderSyntax.imports ⟨initSnap.stx⟩).map (·.module)
+      return processed.cmdState.env.allImportedModuleNames
 
 end Initialization
 
@@ -613,7 +638,8 @@ section NotificationHandling
 
   /--
   Received from the watchdog when a dependency of this file is detected as being stale.
-  Issues a sticky diagnostic to the client that it should run "Restart File".
+  Triggers a worker restart via the same `forceExit 2` mechanism used in `setupImports`,
+  so that the watchdog restarts the worker and rebuilds dependencies.
   -/
   def handleStaleDependency (_ : LeanStaleDependencyParams) : WorkerM Unit := do
     let ctx ← read
@@ -630,6 +656,8 @@ section NotificationHandling
     }
     s.doc.appendStickyDiagnostic diagnostic
     publishDiagnostics ctx s.doc.toEditableDocumentCore
+    IO.sleep 200
+    IO.Process.forceExit 2
 
 def handleRpcRelease (p : Lsp.RpcReleaseParams) : WorkerM Unit := do
   -- NOTE(WN): when the worker restarts e.g. due to changed imports, we may receive `rpc/release`
