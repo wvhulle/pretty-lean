@@ -185,6 +185,17 @@ section Elab
     hasFatal := false
   deriving Inhabited
 
+  abbrev OnDocumentReportedCallback :=
+    DocumentMeta → Array Widget.InteractiveDiagnostic → Array Elab.InfoTree → BaseIO Unit
+
+  builtin_initialize onDocumentReportedCallbacks :
+      IO.Ref (Array OnDocumentReportedCallback) ← IO.mkRef #[]
+
+  def registerOnDocumentReported (cb : OnDocumentReportedCallback) : IO Unit := do
+    if !(← Lean.initializing) then
+      throw <| IO.userError "registerOnDocumentReported: only possible during initialization"
+    onDocumentReportedCallbacks.modify (·.push cb)
+
   register_builtin_option server.reportDelayMs : Nat := {
     defValue := 200
     descr := "(server) time in milliseconds to wait before reporting progress and diagnostics on \
@@ -239,6 +250,9 @@ This option can only be set on the command line, not in the lakefile or via `set
       -- This will overwrite existing ilean info for the file, in case something
       -- went wrong during the incremental updates.
       ctx.chanOut.sync.send <| .ofMsg <| ← mkIleanInfoFinalNotification doc.meta st.allInfoTrees
+      let diags := (← doc.collectCurrentDiagnostics).toArray
+      for cb in (← onDocumentReportedCallbacks.get) do
+        cb doc.meta diags st.allInfoTrees
       return ()
   where
     /--
