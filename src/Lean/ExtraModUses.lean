@@ -76,6 +76,10 @@ builtin_initialize extraModUses : SimplePersistentEnvExtension ExtraModUse (PHas
 public def getExtraModUses (env : Environment) (modIdx : ModuleIdx) : Array ExtraModUse :=
   extraModUses.getModuleEntries env modIdx
 
+/-- Returns additional recorded import dependencies of the module currently being elaborated. -/
+public def getExtraModUsesInEnv (env : Environment) : Array ExtraModUse :=
+  (extraModUses.getState (asyncMode := .local) env).fold (init := #[]) fun acc e => acc.push e
+
 /-- Copies additional recorded import dependencies from one environment to another. -/
 public def copyExtraModUses (src dest : Environment) : Environment := Id.run do
   let mut env := dest
