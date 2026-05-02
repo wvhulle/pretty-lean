@@ -146,6 +146,12 @@ function normalize_reference_urls {
   perl -p -i -e 's#https://lean-lang\.org/doc/reference/(v?[0-9.]+(-rc[0-9]+)?|latest)#REFERENCE#g' "$CAPTURED.out.produced"
 }
 
+# Hover-link source URLs embed the toolchain version (e.g. .../blob/v4.30.0/...);
+# normalize the version segment so golden files don't churn between releases.
+function normalize_source_urls {
+  perl -p -i -e 's#(https://github\.com/leanprover/lean4/blob/v)[0-9]+\.[0-9]+\.[0-9]+#\1VERSION#g' "$CAPTURED.out.produced"
+}
+
 function normalize_measurements {
   # Sed on macOS does not support \S.
   perl -p -i -e 's/^measurement: (\S+) \S+( \S+)?$/measurement: \1 .../' "$CAPTURED.out.produced"

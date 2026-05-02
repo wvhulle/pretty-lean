@@ -30,12 +30,14 @@ COMMANDS:
   check-lint            check if there is a properly configured lint driver
   clean                 remove build outputs
   shake                 minimize imports in source files
+  format <files>...     format Lean source files in place
   env <cmd> <args>...   execute a command in Lake's environment
   lean <file>           elaborate a Lean file in Lake's context
   update                update dependencies and save them to the manifest
   pack                  pack build artifacts into an archive for distribution
   unpack                unpack build artifacts from an distributed archive
   upload <tag>          upload build artifacts to a GitHub release
+  install <targets>...  install executables globally to ~/.lake/bin
   cache                 manage the Lake cache
   script                manage and run workspace scripts
   scripts               shorthand for `lake script list`
@@ -686,6 +688,18 @@ the workspace's root package's additional Lean arguments and the given args
 (in that order). The `lean` process is executed in Lake's environment like
 `lake env lean` (see `lake help env` for how the environment is set up)."
 
+def helpFormat :=
+"Format Lean source files
+
+USAGE:
+  lake format [OPTIONS] <files>...
+
+OPTIONS:
+  --check    check formatting without modifying; exit 1 if any file would change
+
+Formats files in place using the Lean pretty printer. Imports are built
+so syntax extensions are available. Only requires parsing, not elaboration."
+
 def helpTranslateConfig :=
 "Translate a Lake configuration file into a different language
 
@@ -700,6 +714,29 @@ already exists, Lake will error.
 
 Translation is lossy. It does not preserve comments or formatting and
 non-declarative configuration will be discarded."
+
+def helpInstall :=
+"Install a package's executables globally
+
+USAGE:
+  lake install [--git <url> [--branch <branch> | --rev <rev>]] [<targets>...]
+
+Builds the specified executable targets (or all package executables if none
+specified) and installs them to ~/.lake/bin/.
+
+OPTIONS:
+  --git <url>       Install from a Git repository URL
+  --branch <branch> Branch to use when installing from git
+  --rev <rev>       Specific commit or tag to use when installing from git
+
+EXAMPLES:
+  lake install                              Install from current project
+  lake install myexe                        Install specific executable
+  lake install --git <url>                  Install from a Git repository
+  lake install --git <url> --branch dev     Install from a specific branch
+  lake install --git <url> --rev v1.0.0     Install from a tag or commit
+
+Tip: Add ~/.lake/bin to your PATH to use installed executables directly."
 
 public def helpScript : (cmd : String) → String
 | "list"                => helpScriptList
@@ -728,6 +765,7 @@ public def help : (cmd : String) → String
 | "pack"                => helpPack
 | "unpack"              => helpUnpack
 | "upload"              => helpUpload
+| "install"             => helpInstall
 | "cache"               => helpCacheCli
 | "test"                => helpTest
 | "check-test"          => helpCheckTest
@@ -735,6 +773,7 @@ public def help : (cmd : String) → String
 | "check-lint"          => helpCheckLint
 | "clean"               => helpClean
 | "shake"               => helpShake
+| "format" | "fmt"      => helpFormat
 | "script"              => helpScriptCli
 | "scripts"             => helpScriptList
 | "run"                 => helpScriptRun

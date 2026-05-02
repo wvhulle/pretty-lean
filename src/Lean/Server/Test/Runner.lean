@@ -666,6 +666,26 @@ def processInlayHints : RunnerM Unit := do
   }
   logResponse "textDocument/inlayHint" p
 
+def processFormatting : RunnerM Unit := do
+  let p : DocumentFormattingParams := {
+    textDocument := { uri := (← get).uri }
+    options := { tabSize := 2, insertSpaces := true }
+  }
+  logResponse "textDocument/formatting" p (Array TextEdit)
+
+def processRangeFormatting : RunnerM Unit := do
+  let s ← get
+  let some rangeJson := Json.parse s.params |>.toOption
+    | throw <| IO.userError s!"rangeFormatting: failed to parse range params: {s.params}"
+  let some range := (fromJson? rangeJson : Except String Range) |>.toOption
+    | throw <| IO.userError s!"rangeFormatting: failed to decode Range from: {s.params}"
+  let p : DocumentRangeFormattingParams := {
+    textDocument := { uri := s.uri }
+    range
+    options := { tabSize := 2, insertSpaces := true }
+  }
+  logResponse "textDocument/rangeFormatting" p (Array TextEdit)
+
 def processGenericRequest : RunnerM Unit := do
   let s ← get
   let Except.ok params := Json.parse s.params
@@ -710,6 +730,8 @@ def processDirective (_ws directive : String) (directiveTargetLineNo : Nat)
   | "moduleHierarchyImports" => processModuleHierarchyImports
   | "moduleHierarchyImportedBy" => processModuleHierarchyImportedBy
   | "inlayHints" => processInlayHints
+  | "formatting" => processFormatting
+  | "rangeFormatting" => processRangeFormatting
   | _ => processGenericRequest
 
 def processLine (line : String) : RunnerM Unit := do

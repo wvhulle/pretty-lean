@@ -47,10 +47,10 @@ diff_out() {
 }
 echo "# TEST: Direct fetch"
 ($LAKE build dep:release 2>&1 && exit 1 || true) | diff_out "Running" <(cat << 'EOF'
-Running dep:release
-error: failed to fetch GitHub release (run with '-v' for details)
 Some required targets logged failures:
-- dep:release
+
+dep:release:
+  failed to fetch GitHub release (run with '-v' for details)
 error: build failed
 EOF
 )

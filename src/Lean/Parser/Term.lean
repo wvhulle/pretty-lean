@@ -884,6 +884,37 @@ def argument       :=
 -- argument precedence is `arg` (i.e. does not accept `lead` precedence)
 @[builtin_term_parser] def app := trailing_parser:leadPrec:maxPrec many1 argument
 
+open Lean.PrettyPrinter.Formatter in
+/--
+Custom formatter for function application that uses allOrNone grouping
+when named arguments are present. This formats named arguments in a
+record-like style (all on one line, or each on its own line) rather
+than greedy line-filling.
+-/
+@[builtin_formatter Lean.Parser.Term.app]
+def appFormatter : PrettyPrinter.Formatter := do
+  checkKind ``app
+  let stx ← Syntax.MonadTraverser.getCur
+  let argsNode := stx.getArg 1
+  let hasNamedArg := argsNode.getArgs.any fun arg =>
+    arg.getKind == ``namedArgument
+  let fmtArgs : PrettyPrinter.Formatter := do
+    let stx ← Syntax.MonadTraverser.getCur
+    visitArgs <| stx.getArgs.size.forM fun _ _ => do
+      let cur ← Syntax.MonadTraverser.getCur
+      let k := cur.getKind
+      if k == ``namedArgument || k == ``ellipsis then
+        formatterForKind k
+      else
+        categoryParser.formatter `term
+      checkWsBefore.formatter
+  visitArgs do
+    if hasNamedArg then
+      Lean.PrettyPrinter.Formatter.group fmtArgs
+    else
+      fmtArgs
+    categoryParser.formatter `term
+
 /--
 The *extended field notation* `e.f` is roughly short for `T.f e` where `T` is the type of `e`.
 More precisely,

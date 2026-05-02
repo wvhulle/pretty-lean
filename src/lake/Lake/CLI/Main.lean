@@ -26,6 +26,7 @@ import Lake.CLI.Help
 import Lake.CLI.Build
 import Lake.CLI.Actions
 import Lake.CLI.Translate
+import Lake.CLI.Install
 import Lake.CLI.Serve
 public import Lake.CLI.BuiltinLint
 import Init.Data.String.Modify
@@ -79,6 +80,8 @@ public structure LakeOptions where
   runBuiltinLint : Bool := false
   /-- Whether `lake lint` should skip the lint driver (via `--builtin-only`). -/
   builtinOnly : Bool := false
+  gitUrl? : Option String := none
+  gitBranch? : Option String := none
 
 def LakeOptions.outLv (opts : LakeOptions) : LogLevel :=
   opts.outLv?.getD opts.verbosity.minLogLv
@@ -307,6 +310,12 @@ def lakeLongOption : (opt : String) → CliM PUnit
   let configFile ← takeOptArg "--file" "path"
   modifyThe LakeOptions ({· with configFile})
 | "--help"        => modifyThe LakeOptions ({· with wantsHelp := true})
+| "--git" => do
+  let gitUrl ← takeOptArg "--git" "Git URL"
+  modifyThe LakeOptions ({· with gitUrl? := some gitUrl})
+| "--branch" => do
+  let gitBranch ← takeOptArg "--branch" "branch name"
+  modifyThe LakeOptions ({· with gitBranch? := some gitBranch})
 | "--"            => do
   let subArgs ← takeArgs
   modifyThe LakeOptions ({· with subArgs})
@@ -1114,6 +1123,27 @@ protected def lean : CliM PUnit := do
   let rc ← ws.evalLeanFile leanFile opts.subArgs.toArray (mkBuildConfig opts)
   exit rc
 
+protected def format : CliM PUnit := do
+  -- Parse format-specific options before file args
+  let mut check := false
+  let args ← getArgs
+  match args with
+  | "--check" :: rest => setArgs rest; check := true
+  | _ => pure ()
+  processOptions lakeOption
+  let opts ← getThe LakeOptions
+  let files ← takeArgs
+  if files.isEmpty then
+    throw <| CliError.missingArg "files"
+  let ws ← loadWorkspace (← mkLoadConfig opts)
+  let flag := if check then "--format-check" else "--format"
+  let mut anyFailed := false
+  for file in files do
+    let rc ← ws.evalLeanFile file #[flag] (mkBuildConfig opts)
+    if rc != 0 then
+      anyFailed := true
+  if anyFailed then exit 1
+
 protected def translateConfig : CliM PUnit := do
   processOptions lakeOption
   let opts ← getThe LakeOptions
@@ -1193,6 +1223,19 @@ protected def selfCheck : CliM PUnit := do
   processOptions lakeOption
   noArgsRem do verifyInstall (← getThe LakeOptions)
 
+protected def install : CliM PUnit := do
+  processOptions lakeOption
+  let opts ← getThe LakeOptions
+  let targetSpecs ← takeArgs
+  let binDir ← Install.installBinDir
+  let config ← mkLoadConfig opts
+  let buildConfig := mkBuildConfig opts (out := .stdout) (showSuccess := true)
+  if let some gitUrl := opts.gitUrl? then
+    Install.installFromGit gitUrl opts.gitBranch? opts.rev? config binDir targetSpecs buildConfig
+  else
+    let ws ← loadWorkspace config
+    Install.installExes ws binDir targetSpecs buildConfig
+
 protected def help : CliM PUnit := do
   IO.println <| help <| ← takeArgD ""
 
@@ -1210,6 +1253,7 @@ def lakeCli : (cmd : String) → CliM PUnit
 | "pack"                => lake.pack
 | "unpack"              => lake.unpack
 | "upload"              => lake.upload
+| "install"             => lake.install
 | "cache"               => lake.cache
 | "setup-file"          => lake.setupFile
 | "test"                => lake.test
@@ -1218,6 +1262,7 @@ def lakeCli : (cmd : String) → CliM PUnit
 | "check-lint"          => lake.checkLint
 | "clean"               => lake.clean
 | "shake"               => lake.shake
+| "format" | "fmt"      => lake.format
 | "script"              => lake.script
 | "scripts"             => lake.script.list
 | "run"                 => lake.script.run

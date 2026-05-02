@@ -185,6 +185,17 @@ section Elab
     hasFatal := false
   deriving Inhabited
 
+  abbrev OnDocumentReportedCallback :=
+    DocumentMeta → Array Widget.InteractiveDiagnostic → Array Elab.InfoTree → BaseIO Unit
+
+  builtin_initialize onDocumentReportedCallbacks :
+      IO.Ref (Array OnDocumentReportedCallback) ← IO.mkRef #[]
+
+  def registerOnDocumentReported (cb : OnDocumentReportedCallback) : IO Unit := do
+    if !(← Lean.initializing) then
+      throw <| IO.userError "registerOnDocumentReported: only possible during initialization"
+    onDocumentReportedCallbacks.modify (·.push cb)
+
   register_builtin_option server.reportDelayMs : Nat := {
     defValue := 200
     descr := "(server) time in milliseconds to wait before reporting progress and diagnostics on \
@@ -239,6 +250,9 @@ This option can only be set on the command line, not in the lakefile or via `set
       -- This will overwrite existing ilean info for the file, in case something
       -- went wrong during the incremental updates.
       ctx.chanOut.sync.send <| .ofMsg <| ← mkIleanInfoFinalNotification doc.meta st.allInfoTrees
+      let diags := (← doc.collectCurrentDiagnostics).toArray
+      for cb in (← onDocumentReportedCallbacks.get) do
+        cb doc.meta diags st.allInfoTrees
       return ()
   where
     /--
@@ -366,15 +380,29 @@ abbrev WorkerM := ReaderT WorkerContext <| StateRefT WorkerState IO
 private builtin_initialize importsLoadedRef : IO.Ref Bool ← IO.mkRef false
 
 open Language Lean in
+/-- Create a warning diagnostic covering only line 1. -/
+private def diagnosticsOfBuildWarning (msg : String) : BaseIO Language.Snapshot.Diagnostics :=
+  Language.Snapshot.Diagnostics.ofMessageLog <| MessageLog.empty.add {
+    fileName := "<input>"
+    pos := ⟨1, 0⟩
+    endPos := some ⟨2, 0⟩
+    severity := .warning
+    data := msg
+  }
+
+
+open Language Lean in
 /--
 Callback from Lean language processor after parsing imports that requests necessary information from
 Lake for processing imports.
 -/
 def setupImports
-    (doc         : DocumentMeta)
-    (cmdlineOpts : Options)
-    (chanOut     : Std.Channel OutputMessage)
-    (stx         : Elab.HeaderSyntax)
+    (doc                  : DocumentMeta)
+    (cmdlineOpts          : Options)
+    (chanOut              : Std.Channel OutputMessage)
+    (clientCapabilities   : Lsp.ClientCapabilities)
+    (createProgressToken  : IO Unit)
+    (stx                  : Elab.HeaderSyntax)
     : Language.ProcessingT IO (Except Language.Lean.HeaderProcessedSnapshot SetupImportsResult) := do
   let importsAlreadyLoaded ← importsLoadedRef.modifyGet ((·, true))
   if importsAlreadyLoaded then
@@ -386,24 +414,39 @@ def setupImports
     -- should not be visible to user as task is already canceled
     return .error { diagnostics := .empty, result? := none, metaSnap := default }
 
+  let useProgress := clientCapabilities.workDoneProgress
+  let progressToken := lakeProgressToken
+  if useProgress then
+    createProgressToken
+    chanOut.sync.send <| .ofMsg <| mkProgressBeginNotification progressToken "Lake"
+        (message? := some "Setting up dependencies...")
+
   let header := stx.toModuleHeader
   let fileSetupResult ← setupFile doc header fun stderrLine => do
-    let progressDiagnostic := {
-      range      := ⟨⟨0, 0⟩, ⟨1, 0⟩⟩
-      -- make progress visible anywhere in the file
-      fullRange? := some ⟨⟨0, 0⟩, doc.text.utf8PosToLspPos doc.text.source.rawEndPos⟩
-      severity?  := DiagnosticSeverity.information
-      message    := stderrLine
-    }
-    chanOut.sync.send <| .ofMsg <| mkPublishDiagnosticsNotification doc #[progressDiagnostic]
-  let isSetupError := fileSetupResult matches .importsOutOfDate
-    || fileSetupResult matches .error ..
+    if useProgress then
+      let cleanLine := (stderrLine.trimAsciiEnd.toString.dropPrefix "✔ " |>.dropPrefix "✗ ").toString
+      chanOut.sync.send <| .ofMsg <| mkProgressReportNotification progressToken
+          (message? := some cleanLine)
+    else
+      let progressDiagnostic := {
+        range      := ⟨⟨0, 0⟩, ⟨1, 0⟩⟩
+        -- make progress visible anywhere in the file
+        fullRange? := some ⟨⟨0, 0⟩, doc.text.utf8PosToLspPos doc.text.source.rawEndPos⟩
+        severity?  := DiagnosticSeverity.information
+        message    := stderrLine
+      }
+      chanOut.sync.send <| .ofMsg <| mkPublishDiagnosticsNotification doc #[progressDiagnostic]
+  let isSetupError := fileSetupResult.kind matches .importsOutOfDate
+    || fileSetupResult.kind matches .error ..
   chanOut.sync.send <| .ofMsg <|
     mkIleanHeaderSetupInfoNotification doc (collectImports stx) isSetupError
-  -- clear progress notifications in the end
-  chanOut.sync.send <| .ofMsg <| mkPublishDiagnosticsNotification doc #[]
+  if useProgress then
+    chanOut.sync.send <| .ofMsg <| mkProgressEndNotification progressToken
+  else
+    -- clear progress notifications in the end
+    chanOut.sync.send <| .ofMsg <| mkPublishDiagnosticsNotification doc #[]
   let setup ← do
-    match fileSetupResult with
+    match fileSetupResult.kind with
     | .importsOutOfDate =>
       return .error {
         diagnostics := (← Language.diagnosticsOfHeaderError
@@ -413,16 +456,30 @@ def setupImports
         metaSnap := default
         : Language.Lean.HeaderProcessedSnapshot
       }
-    | .error msg =>
-      return .error {
-        diagnostics := (← diagnosticsOfHeaderError msg)
-        result? := none
-        metaSnap := default
-      }
-    | .noLakefile =>
-      pure { name := doc.mod, isModule := header.isModule }
-    | .success setup =>
-      pure setup
+    | .error err =>
+      let crossFileDiags ← serialMessagesToCrossFileDiagnostics err.buildDiagnostics
+      for (uri, diags) in crossFileDiags do
+        chanOut.sync.send <| .ofMsg <| (⟨"textDocument/publishDiagnostics",
+          ({ uri, version? := none, diagnostics := diags } : PublishDiagnosticsParams)⟩ :
+          JsonRpc.Notification PublishDiagnosticsParams)
+      unless crossFileDiags.isEmpty do
+        -- Tell watchdog which URIs we published so it can clear them on restart
+        let uris := crossFileDiags.map (·.1)
+        chanOut.sync.send <| .ofMsg <| (⟨"$/lean/crossFileDiagnosticUris", uris⟩ :
+          JsonRpc.Notification (Array DocumentUri))
+        chanOut.sync.send <| .ofMsg <| (⟨"window/showMessage",
+          ({ type := .error,
+             message := s!"Lake build failed: {err.buildDiagnostics.size} error(s)"
+           } : ShowMessageParams)⟩ : JsonRpc.Notification ShowMessageParams)
+      let diagnostics ← if err.buildDiagnostics.isEmpty then
+          diagnosticsOfHeaderError err.summary
+        else
+          let targets := ", ".intercalate err.failedTargets.toList
+          diagnosticsOfBuildWarning s!"Lake build of target(s) {targets} failed"
+      return .error { diagnostics, result? := none, metaSnap := default }
+    | _ => pure ()
+
+  let setup := fileSetupResult.setup
 
   -- override cmdline options with file options
   let opts := cmdlineOpts.mergeBy (fun _ _ fileOpt => fileOpt) setup.options.toOptions
@@ -461,7 +518,18 @@ section Initialization
           -- Emit a refresh request after a file worker restart.
           pendingRefreshInfo? := some { lastRefreshTimestamp := timestamp, successiveRefreshAttempts := 0 }
         })
-    let processor := Language.Lean.process (setupImports doc opts chanOut)
+    let createProgressToken : IO Unit :=
+      if initParams.capabilities.workDoneProgress then do
+        let requestId ← freshRequestIdRef.modifyGet fun id => (id, id + 1)
+        let responsePromise ← IO.Promise.new
+        pendingServerRequestsRef.modify (·.insert requestId responsePromise)
+        chanOut.sync.send <| .ofMsg <|
+          mkWorkDoneProgressCreateRequest requestId lakeProgressToken
+        let _ ← IO.wait responsePromise.result!
+      else
+        pure ()
+    let processor := Language.Lean.process
+        (setupImports doc opts chanOut initParams.capabilities createProgressToken)
     let processor ← Language.mkIncrementalProcessor processor
     let initSnap ← processor doc.mkInputContext
     let _ ← ServerTask.IO.asTask do
@@ -525,13 +593,12 @@ section Initialization
         o.writeSerializedLspMessage serialized |>.catchExceptions (fun _ => pure ())
       return chanOut
 
-    getImportClosure? (snap : Language.Lean.InitialSnapshot) : Array Name := Id.run do
-      let some snap := snap.result?
+    getImportClosure? (initSnap : Language.Lean.InitialSnapshot) : Array Name := Id.run do
+      let some parsed := initSnap.result?
         | return #[]
-      let some snap ← snap.processedSnap.get.result?
-        | return #[]
-      let importClosure := snap.cmdState.env.allImportedModuleNames
-      return importClosure
+      let some processed ← parsed.processedSnap.get.result?
+        | return (Elab.HeaderSyntax.imports ⟨initSnap.stx⟩).map (·.module)
+      return processed.cmdState.env.allImportedModuleNames
 
 end Initialization
 
@@ -613,7 +680,8 @@ section NotificationHandling
 
   /--
   Received from the watchdog when a dependency of this file is detected as being stale.
-  Issues a sticky diagnostic to the client that it should run "Restart File".
+  Triggers a worker restart via the same `forceExit 2` mechanism used in `setupImports`,
+  so that the watchdog restarts the worker and rebuilds dependencies.
   -/
   def handleStaleDependency (_ : LeanStaleDependencyParams) : WorkerM Unit := do
     let ctx ← read
@@ -630,6 +698,8 @@ section NotificationHandling
     }
     s.doc.appendStickyDiagnostic diagnostic
     publishDiagnostics ctx s.doc.toEditableDocumentCore
+    IO.sleep 200
+    IO.Process.forceExit 2
 
 def handleRpcRelease (p : Lsp.RpcReleaseParams) : WorkerM Unit := do
   -- NOTE(WN): when the worker restarts e.g. due to changed imports, we may receive `rpc/release`
@@ -972,6 +1042,8 @@ def runRefreshTasks : WorkerM (Array (ServerTask Unit)) := do
   let ctx ← read
   let mut tasks := #[]
   for (method, refreshMethod, refreshIntervalMs) in ← partialLspRequestHandlerMethods do
+    unless ctx.initParams.capabilities.supportsRefresh refreshMethod do
+      continue
     tasks := tasks.push <| ← ServerTask.BaseIO.asTask do
       while true do
         let lastRefreshTimestamp? ← ctx.modifyGetPartialHandler method fun h => Id.run do
@@ -1050,6 +1122,10 @@ def initAndRunWorker (i o e : FS.Stream) (opts : Options) : IO Unit := do
   }
   let e := e.withPrefix s!"[{param.textDocument.uri}] "
   let _ ← IO.setStderr e
+  -- Merge options from initializationOptions; CLI `-D` flags take precedence.
+  let opts := match initParams.param.initializationOptions?.bind (·.options?) with
+    | some lspOpts => opts.mergeBy (fun _ cliVal _ => cliVal) lspOpts.toOptions
+    | none => opts
   let (ctx, st) ← try
     initializeWorker doc o e initParams.param opts
   catch err =>

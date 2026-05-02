@@ -8,6 +8,7 @@ module
 
 prelude
 public import Lean.Server.FileWorker.ExampleHover
+public import Lean.Server.FileWorker.Formatting
 public import Lean.Server.FileWorker.InlayHints
 public import Lean.Server.FileWorker.SemanticHighlighting
 public import Lean.Server.FileWorker.SignatureHelp
@@ -25,6 +26,27 @@ open RequestM
 open Snapshots
 
 open Lean.Parser.Tactic.Doc (alternativeOfTactic getTacticExtensionString)
+
+/-- Structured hover content embedded in `Diagnostic.data?` by external tools (e.g. linters).
+Rendered as: **title** *(tag1, tag2)*\n\nbody -/
+private structure DiagnosticHoverData where
+  /-- Shown in bold as the hover heading. -/
+  hoverTitle : String := ""
+  /-- Shown dimmed in parentheses after the title. -/
+  hoverTags : Array String := #[]
+  /-- Markdown body with details. -/
+  hoverBody : String := ""
+  deriving FromJson
+
+private def DiagnosticHoverData.render (d : DiagnosticHoverData) : Option String :=
+  if d.hoverTitle.isEmpty && d.hoverBody.isEmpty then none
+  else
+    let title := if d.hoverTitle.isEmpty then "" else s!"**{d.hoverTitle}**"
+    let tags := if d.hoverTags.isEmpty then ""
+      else s!" *({", ".intercalate d.hoverTags.toList})*"
+    let header := title ++ tags
+    let parts := #[header, d.hoverBody].filter (!·.isEmpty)
+    some ("\n\n".intercalate parts.toList)
 
 def findCompletionCmdDataAtPos
     (doc : EditableDocument)
@@ -78,15 +100,24 @@ def handleHover (p : HoverParams)
     : RequestM (RequestTask (Option Hover)) := do
   let doc ← readDoc
   let text := doc.meta.text
-  let mkHover (s : String) (r : Lean.Syntax.Range) : Hover :=
+  let mkHover (s : String) (r : Option (Lsp.Range)) : Hover :=
     let s := Hover.rewriteExamples s
     {
       contents := {
         kind := MarkupKind.markdown
         value := s
       }
-      range? := r.toLspRange text
+      range? := r
     }
+
+  -- Extract hover link templates from initialization options
+  let linkTemplates : Array (String × String) :=
+    match (← read).initParams.initializationOptions? with
+    | some opts =>
+      match opts.hoverLinks? with
+      | some templates => templates.map fun t => (t.label, t.url)
+      | none => #[]
+    | none => #[]
 
   let hoverPos := text.lspPosToUtf8Pos p.position
   withWaitFindSnap doc (fun s => s.endPos > hoverPos)
@@ -99,20 +130,35 @@ def handleHover (p : HoverParams)
           let docStr ← findDocString? snap.env kind
           return docStr.map (·, stx.getRange?.get!)
         | none => pure none
-      -- now try info tree
+      -- Collect all hover parts: info tree / parser docstring, then diagnostic hovers
+      let mut parts : Array String := #[]
+      let mut range? : Option Lsp.Range := none
+      -- info tree hover
       if let some result := snap.infoTree.hoverableInfoAtM? (m := Id) hoverPos then
         let ctx := result.ctx
         let info := result.info
-        if let some range := info.range? then
-          -- prefer info tree if at least as specific as parser docstring
-          if stxDoc?.all fun (_, stxRange) => stxRange.includes range then
-            if let some hoverFmt ← info.fmtHover? ctx then
-              return mkHover (toString hoverFmt.fmt) range
-
-      if let some (doc, range) := stxDoc? then
-        return mkHover doc range
-
-      return none
+        if let some r := info.range? then
+          if stxDoc?.all fun (_, stxRange) => stxRange.includes r then
+            if let some hoverFmt ← info.fmtHover? ctx linkTemplates then
+              parts := parts.push (toString hoverFmt.fmt)
+              range? := r.toLspRange text
+      -- parser docstring fallback
+      if parts.isEmpty then
+        if let some (d, r) := stxDoc? then
+          parts := parts.push d
+          range? := r.toLspRange text
+      -- diagnostic hovers from published diagnostics overlapping the cursor
+      let lspPos := p.position
+      let diags ← doc.collectCurrentDiagnostics
+      for diag in diags do
+        let r := diag.fullRange
+        if compare r.start lspPos != .gt && compare lspPos r.«end» != .gt then
+          if let some json := diag.data? then
+            if let some hoverData := (fromJson? json).toOption (α := DiagnosticHoverData) then
+              if let some rendered := hoverData.render then
+                parts := parts.push rendered
+      if parts.isEmpty then return none
+      return mkHover ("\n\n---\n\n".intercalate parts.toList) range?
 
 open Elab GoToKind in
 -- The `LeanLocationLink`s in this request get converted to `LocationLink` by the Watchdog process.
@@ -481,6 +527,37 @@ partial def handleWaitForDiagnostics (p : WaitForDiagnosticsParams)
     return doc.reporter.bindCheap (fun _ => doc.cmdSnaps.waitAll)
       |>.mapCheap fun _ => pure WaitForDiagnostics.mk
 
+def handleDocumentFormatting (_ : DocumentFormattingParams)
+    : RequestM (RequestTask (Array TextEdit)) := do
+  let doc ← readDoc
+  let text := doc.meta.text
+  let initSnap := doc.initSnap
+  let some headerParsed := initSnap.result?
+    | return ServerTask.pure (.error (RequestError.internalError "header parsing failed"))
+  let headerProcessedTask := headerParsed.processedSnap.task.asServerTask
+  mapTaskCostly headerProcessedTask fun headerProcessed => do
+    let some headerSuccess := headerProcessed.result?
+      | throw ⟨.internalError, "import processing failed"⟩
+    Formatting.formatCommandRange doc text initSnap headerParsed headerSuccess
+      0 text.source.rawEndPos
+
+/-- Handle `textDocument/rangeFormatting`: format only commands overlapping the given range. -/
+def handleDocumentRangeFormatting (p : DocumentRangeFormattingParams)
+    : RequestM (RequestTask (Array TextEdit)) := do
+  let doc ← readDoc
+  let text := doc.meta.text
+  let initSnap := doc.initSnap
+  let some headerParsed := initSnap.result?
+    | return ServerTask.pure (.error (RequestError.internalError "header parsing failed"))
+  let headerProcessedTask := headerParsed.processedSnap.task.asServerTask
+  mapTaskCostly headerProcessedTask fun headerProcessed => do
+    let some headerSuccess := headerProcessed.result?
+      | throw ⟨.internalError, "import processing failed"⟩
+    let rangeStart := text.lspPosToUtf8Pos p.range.start
+    let rangeEnd := text.lspPosToUtf8Pos p.range.«end»
+    Formatting.formatCommandRange doc text initSnap headerParsed headerSuccess
+      rangeStart rangeEnd
+
 def handleDocumentColor (_ : DocumentColorParams) :
     RequestM (RequestTask (Array ColorInformation)) :=
   -- By default, if no document color provider is registered, VS Code itself provides
@@ -548,6 +625,16 @@ builtin_initialize
     SignatureHelpParams
     (Option SignatureHelp)
     handleSignatureHelp
+  registerLspRequestHandler
+    "textDocument/formatting"
+    DocumentFormattingParams
+    (Array TextEdit)
+    handleDocumentFormatting
+  registerLspRequestHandler
+    "textDocument/rangeFormatting"
+    DocumentRangeFormattingParams
+    (Array TextEdit)
+    handleDocumentRangeFormatting
   registerLspRequestHandler
     "textDocument/documentColor"
     DocumentColorParams

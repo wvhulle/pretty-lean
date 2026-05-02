@@ -153,6 +153,7 @@ structure TacticInfo extends ElabInfo where
   goalsBefore : List MVarId
   mctxAfter   : MetavarContext
   goalsAfter  : List MVarId
+  elapsedNs   : Nat := 0
   deriving Inhabited
 
 structure MacroExpansionInfo where

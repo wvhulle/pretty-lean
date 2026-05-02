@@ -230,6 +230,9 @@ section FileWorker
     exitCode  : Std.Mutex (Option UInt32)
     commTask? : Option (ServerTask WorkerEvent)
     state     : Std.Mutex WorkerState
+    /-- URIs that this worker published cross-file diagnostics to.
+    Used by the watchdog to clear stale diagnostics on worker restart. -/
+    crossFileDiagUris : Std.Mutex (Array DocumentUri)
 
   namespace FileWorker
 
@@ -474,6 +477,14 @@ section ServerM
 
   def getWorkerState (fw : FileWorker) : ServerM WorkerState := do
     fw.state.atomically get
+
+  /-- Clear cross-file diagnostics that a worker previously published. -/
+  private def clearCrossFileDiagnostics (fw : FileWorker) : ServerM Unit := do
+    let uris ← fw.crossFileDiagUris.atomically (modifyGet fun uris => (uris, #[]))
+    for uri in uris do
+      writeMessage <| (⟨"textDocument/publishDiagnostics",
+        ({ uri, version? := none, diagnostics := #[] } : PublishDiagnosticsParams)⟩ :
+        JsonRpc.Notification PublishDiagnosticsParams)
 
   def errorPendingRequests (uri : DocumentUri) (code : ErrorCode) (msg : String)
       : ServerM Unit := do
@@ -831,6 +842,11 @@ section ServerM
         | .notification "$/lean/importClosure" =>
           if let .ok params := parseNotificationParams? LeanImportClosureParams msg then
             handleImportClosure fw params
+        | .notification "$/lean/crossFileDiagnosticUris" =>
+          if let .ok uris := parseNotificationParams? (Array DocumentUri) msg then
+            fw.crossFileDiagUris.atomically do set uris
+        | .notification "$/progress" =>
+          writeSerializedMessage msg
         | _ =>
           writeSerializedMessage msg
 
@@ -860,6 +876,7 @@ section ServerM
       exitCode
       commTask? := none
       state := ← Std.Mutex.new WorkerState.running
+      crossFileDiagUris := ← Std.Mutex.new #[]
     }
     -- Adds `fw` without `commTask` so that `forwardMessages` can find it in `fileWorkersRef`.
     -- At the time of writing this comment, this isn't necessary since `forwardMessages` never uses
@@ -901,6 +918,7 @@ section ServerM
       -- Clear the diagnostics for this file so that stale errors
       -- do not remain in the editor forever.
       writeMessage <| mkPublishDiagnosticsNotification fw.doc #[]
+      clearCrossFileDiagnostics fw
     catch _ =>
       -- Client closed stdout => Still ensure that file worker is terminated
       pure ()
@@ -928,6 +946,7 @@ section ServerM
       if ! (msg matches .notification "textDocument/didChange" ..) then
         -- Only restart crashed FileWorkers on `didChange`.
         return
+      clearCrossFileDiagnostics fw
       eraseFileWorker uri
       startFileWorker fw.doc
     | WorkerState.running =>
@@ -937,16 +956,12 @@ section ServerM
         setWorkerState fw .cannotWrite
 
   /--
-  Sends a notification to the file worker identified by `uri` that its dependency `staleDependency`
+  Sends a notification to the file worker identified by `uri` that one of its dependencies
   is out-of-date.
   -/
-  def notifyAboutStaleDependency (uri : DocumentUri) (staleDependency : DocumentUri)
-      : ServerM Unit :=
-    let notification := Notification.mk "$/lean/staleDependency" {
-      staleDependency := staleDependency
-      : LeanStaleDependencyParams
-    }
-    tryWriteMessage uri notification
+  def notifyAboutStaleDependency (uri : DocumentUri) : ServerM Unit :=
+    tryWriteMessage uri <|
+      Notification.mk "$/lean/staleDependency" ({} : LeanStaleDependencyParams)
 end ServerM
 
 section RequestHandling
@@ -1270,7 +1285,7 @@ section NotificationHandling
     for ⟨uri, _⟩ in fws do
       if ! dependents.contains uri then
         continue
-      notifyAboutStaleDependency uri p.textDocument.uri
+      notifyAboutStaleDependency uri
 
   def handleDidClose (p : DidCloseTextDocumentParams) : ServerM Unit :=
     terminateFileWorker p.textDocument.uri
@@ -1284,7 +1299,7 @@ section NotificationHandling
       for (c, _) in leanChanges do
         let dependents := importData.importedBy.getD c.uri ∅
         for dependent in dependents do
-          notifyAboutStaleDependency dependent c.uri
+          notifyAboutStaleDependency dependent
     if ! ileanChanges.isEmpty then
       let oleanSearchPath ← Lean.searchPathRef.get
       for (c, path) in ileanChanges do
@@ -1313,7 +1328,9 @@ section NotificationHandling
 
   def forwardNotification {α : Type} [ToJson α] [FileSource α] (method : String) (params : α)
       : ServerM Unit :=
-    tryWriteMessage (fileSource params) (Notification.mk method params)
+    match fileSource? params with
+    | some fi => tryWriteMessage fi (Notification.mk method params)
+    | none => return
 end NotificationHandling
 
 section MessageHandling
@@ -1321,7 +1338,12 @@ section MessageHandling
     let fileId : DocumentUri ←
       if method == "$/lean/rpc/connect" then
         let ps ← parseParams Lsp.RpcConnectParams params
-        pure <| fileSource ps
+        match fileSource? ps with
+        | some fi => pure fi
+        | none =>
+          writeMessage <| (RequestError.invalidParams
+            s!"could not determine file source for '{method}'").toLspResponseError id
+          return
       else
         match (← routeLspRequest method params) with
         | Except.error e =>
@@ -1540,15 +1562,22 @@ section MainLoop
             (ErrorCode.workerExited, "see stderr for exception")
           else
             (ErrorCode.workerCrashed, "likely due to a stack overflow or a bug")
-        errorPendingRequests uri errorCode
-          s!"Server process for {uri} crashed, {errorCausePointer}."
+        let crashMsg := s!"Server process for {uri} crashed, {errorCausePointer}."
+        errorPendingRequests uri errorCode crashMsg
         writeMessage <| mkFileProgressAtPosNotification doc 0 (kind := LeanFileProgressKind.fatalError)
+        writeMessage <| (⟨"window/showMessage",
+          { type := MessageType.error, message := crashMsg : ShowMessageParams }⟩ :
+          JsonRpc.Notification ShowMessageParams)
         setWorkerState fw .crashed
         mainLoop clientTask
       | WorkerEvent.terminated =>
         throwServerError
           "Internal server error: Got termination event for worker that should have been removed"
       | .importsChanged =>
+        -- Clear stale diagnostics (e.g. "Lake build of target(s) ... failed") so they
+        -- don't persist while the new worker rebuilds.
+        writeMessage <| mkPublishDiagnosticsNotification doc #[]
+        clearCrossFileDiagnostics fw
         startFileWorker doc
         mainLoop clientTask
 end MainLoop
@@ -1598,6 +1627,8 @@ def mkLeanServerCapabilities : ServerCapabilities := {
     triggerCharacters? := some #[" "]
   }
   colorProvider? := some {}
+  documentFormattingProvider := true
+  documentRangeFormattingProvider := true
   experimental? := some {
     moduleHierarchyProvider? := some {}
     rpcProvider? := some {

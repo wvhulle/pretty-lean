@@ -492,8 +492,6 @@ structure BaseMessage (α : Type u) where
   /-- JSON-encoded payload propagated to LSP `Diagnostic.data?`. Used by tools
   that attach structured hover data (see `DiagnosticHoverData`). -/
   diagnosticData? : Option String := none
-  /-- The content of the message. -/
-  data          : α
   deriving Inhabited, ToJson, FromJson
 
 /-- A `Message` is a richly formatted piece of information emitted by Lean.

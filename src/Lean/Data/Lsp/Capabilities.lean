@@ -42,7 +42,8 @@ structure ShowDocumentClientCapabilities where
   deriving ToJson, FromJson
 
 structure WindowClientCapabilities where
-  showDocument? : Option ShowDocumentClientCapabilities := none
+  showDocument?     : Option ShowDocumentClientCapabilities := none
+  workDoneProgress? : Option Bool := none
   deriving ToJson, FromJson
 
 structure ChangeAnnotationSupport where
@@ -58,9 +59,19 @@ structure WorkspaceEditClientCapabilities where
   resourceOperations?      : Option (Array String) := none
   deriving ToJson, FromJson
 
+structure InlayHintWorkspaceClientCapabilities where
+  refreshSupport? : Option Bool := none
+  deriving ToJson, FromJson
+
+structure SemanticTokensWorkspaceClientCapabilities where
+  refreshSupport? : Option Bool := none
+  deriving ToJson, FromJson
+
 structure WorkspaceClientCapabilities where
   applyEdit? : Option Bool := none
   workspaceEdit? : Option WorkspaceEditClientCapabilities := none
+  inlayHint? : Option InlayHintWorkspaceClientCapabilities := none
+  semanticTokens? : Option SemanticTokensWorkspaceClientCapabilities := none
   deriving ToJson, FromJson
 
 structure LeanClientCapabilities where
@@ -89,6 +100,17 @@ structure ClientCapabilities where
   /-- Capabilities for Lean language server extensions. -/
   lean?         : Option LeanClientCapabilities         := none
   deriving ToJson, FromJson
+
+def ClientCapabilities.supportsRefresh (c : ClientCapabilities) (refreshMethod : String) : Bool :=
+  match refreshMethod with
+  | "workspace/inlayHint/refresh" =>
+    c.workspace?.bind (·.inlayHint?) |>.bind (·.refreshSupport?) |>.getD false
+  | "workspace/semanticTokens/refresh" =>
+    c.workspace?.bind (·.semanticTokens?) |>.bind (·.refreshSupport?) |>.getD false
+  | _ => false
+
+def ClientCapabilities.workDoneProgress (c : ClientCapabilities) : Bool :=
+  c.window?.bind (·.workDoneProgress?) |>.getD false
 
 def ClientCapabilities.incrementalDiagnosticSupport (c : ClientCapabilities) : Bool := Id.run do
   let some lean := c.lean?
@@ -136,6 +158,8 @@ structure ServerCapabilities where
   inlayHintProvider?        : Option InlayHintOptions        := none
   signatureHelpProvider?    : Option SignatureHelpOptions    := none
   colorProvider?            : Option DocumentColorOptions    := none
+  documentFormattingProvider : Bool                          := false
+  documentRangeFormattingProvider : Bool                     := false
   experimental?             : Option LeanServerCapabilities  := none
   deriving ToJson, FromJson
 
